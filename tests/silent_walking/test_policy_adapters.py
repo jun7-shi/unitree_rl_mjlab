@@ -1,6 +1,8 @@
 import torch
 
 from src.evaluation.silent_walking.policy_adapters import (
+  OnnxPolicyAdapter,
+  TorchscriptPolicyAdapter,
   ZeroPolicyAdapter,
   adapt_policy_path,
 )
@@ -21,3 +23,50 @@ def test_adapt_policy_path_rejects_unknown_suffix():
     assert "Unsupported policy format" in str(exc)
   else:
     raise AssertionError("Expected ValueError")
+
+
+def test_torchscript_policy_adapter_uses_loaded_module(monkeypatch):
+  class FakePolicy:
+    def eval(self):
+      return self
+
+    def __call__(self, obs):
+      return obs + 1.0
+
+  monkeypatch.setattr(torch.jit, "load", lambda path, map_location=None: FakePolicy())
+
+  adapter = TorchscriptPolicyAdapter("policy.pt", device="cpu")
+  out = adapter.act(torch.zeros(1, 4))
+
+  assert torch.allclose(out, torch.ones(1, 4))
+
+
+def test_onnx_policy_adapter_uses_device_specific_providers(monkeypatch):
+  class FakeSession:
+    def __init__(self, path, providers):
+      self.path = path
+      self.providers = providers
+
+    def get_inputs(self):
+      class FakeInput:
+        name = "obs"
+
+      return [FakeInput()]
+
+    def run(self, _, inputs):
+      return [inputs["obs"]]
+
+  class FakeOrt:
+    InferenceSession = FakeSession
+
+  monkeypatch.setattr(
+    "src.evaluation.silent_walking.policy_adapters.ort",
+    FakeOrt(),
+  )
+
+  adapter = OnnxPolicyAdapter("policy.onnx", device="cuda:0")
+
+  assert adapter._session.providers == [
+    "CUDAExecutionProvider",
+    "CPUExecutionProvider",
+  ]

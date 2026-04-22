@@ -13,6 +13,15 @@ except ImportError:  # pragma: no cover - handled when ONNX adapter is used.
   ort = None
 
 
+def _onnx_providers_for_device(device: str) -> list[str]:
+  """Return a provider preference list matching the requested device."""
+
+  normalized = device.lower()
+  if normalized.startswith("cuda"):
+    return ["CUDAExecutionProvider", "CPUExecutionProvider"]
+  return ["CPUExecutionProvider"]
+
+
 class PolicyAdapter(Protocol):
   """Minimal inference interface required by the evaluator."""
 
@@ -61,7 +70,10 @@ class OnnxPolicyAdapter:
       raise ImportError("onnxruntime is required to load ONNX policies")
 
     self._device = torch.device(device)
-    self._session = ort.InferenceSession(path)
+    self._session = ort.InferenceSession(
+      path,
+      providers=_onnx_providers_for_device(device),
+    )
     self._input_name = self._session.get_inputs()[0].name
 
   def reset(self) -> None:
