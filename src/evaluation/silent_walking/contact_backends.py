@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import numpy as np
 import torch
-import mujoco
 
 from mjlab.sensor import ContactSensor
 
@@ -100,32 +98,11 @@ def extract_capsule_layout_positions(env, robot_name: str) -> tuple[tuple[str, .
   return tuple(geom_names), robot.data.geom_pos_w[:, geom_ids, :2]
 
 
-def _resolve_sim_geom_ids(env, geom_names: tuple[str, ...]) -> list[int]:
-  """Resolve local evaluator geom names to MuJoCo geom ids."""
-
-  sim_geom_names = {
-    env.sim.mj_model.geom(geom_id).name: geom_id
-    for geom_id in range(env.sim.mj_model.ngeom)
-  }
-  resolved_ids: list[int] = []
-  for geom_name in geom_names:
-    candidates = (
-      sim_geom_names.get(geom_name),
-      sim_geom_names.get(f"robot/{geom_name}"),
-    )
-    resolved_id = next((candidate for candidate in candidates if candidate is not None), None)
-    if resolved_id is None:
-      raise KeyError(f"Unable to resolve MuJoCo geom id for '{geom_name}'")
-    resolved_ids.append(resolved_id)
-
-  return resolved_ids
-
-
 def extract_capsule_contact_forces(
   env,
   robot_name: str,
 ) -> tuple[tuple[str, ...], torch.Tensor, torch.Tensor]:
-  """Extract per-capsule summed world-z contact forces and contact flags."""
+  """Extract per-capsule world-z contact forces and contact flags."""
 
   if not supports_contact_backend(robot_name):
     spec = get_robot_spec(robot_name)
@@ -134,29 +111,13 @@ def extract_capsule_contact_forces(
     )
 
   spec = get_robot_spec(robot_name)
-  geom_names = spec.foot_collision_geom_names
-  sim_geom_ids = _resolve_sim_geom_ids(env, geom_names)
-  sim_geom_to_index = {geom_id: idx for idx, geom_id in enumerate(sim_geom_ids)}
-
-  normal_forces = torch.zeros((1, len(geom_names)), dtype=torch.float32)
-  contact_flags = torch.zeros((1, len(geom_names)), dtype=torch.bool)
-  contact_wrench = np.zeros(6, dtype=np.float64)
-
-  for contact_idx in range(env.sim.mj_data.ncon):
-    contact = env.sim.mj_data.contact[contact_idx]
-    geom_id = None
-    if contact.geom1 in sim_geom_to_index:
-      geom_id = contact.geom1
-    elif contact.geom2 in sim_geom_to_index:
-      geom_id = contact.geom2
-    if geom_id is None:
-      continue
-
-    mujoco.mj_contactForce(env.sim.mj_model, env.sim.mj_data, contact_idx, contact_wrench)
-    contact_frame = np.array(contact.frame, dtype=np.float64).reshape(3, 3)
-    world_force = contact_frame.T @ contact_wrench[:3]
-    geom_index = sim_geom_to_index[geom_id]
-    normal_forces[0, geom_index] += float(max(world_force[2], 0.0))
-    contact_flags[0, geom_index] = True
-
-  return geom_names, normal_forces, contact_flags
+  sensor: ContactSensor = env.scene["foot_capsule_ground_contact"]
+  force = sensor.data.force
+  found = sensor.data.found
+  if force is None or found is None:
+    raise RuntimeError("foot_capsule_ground_contact data is unavailable")
+  if force.shape[1] != len(spec.foot_collision_geom_names):
+    raise RuntimeError(
+      "foot_capsule_ground_contact shape does not match robot foot collision geoms"
+    )
+  return spec.foot_collision_geom_names, force[..., 2].abs(), found > 0

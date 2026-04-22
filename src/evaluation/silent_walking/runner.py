@@ -25,6 +25,7 @@ os.environ.setdefault("WARP_CACHE_PATH", str(_WARP_CACHE_DIR))
 import mjlab.tasks  # noqa: F401
 from mjlab.envs import ManagerBasedRlEnv
 from mjlab.rl import MjlabOnPolicyRunner, RslRlVecEnvWrapper
+from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.registry import load_env_cfg
 from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
@@ -91,6 +92,32 @@ def _validate_runtime_support(robot_name: str) -> None:
     raise NotImplementedError(
       f"Silent walking runtime evaluation is not wired yet for robot '{spec.name}'"
     )
+
+
+def _ensure_capsule_contact_sensor(env_cfg, robot_name: str) -> None:
+  """Attach a per-capsule ground contact sensor to the evaluation env config."""
+
+  spec = get_robot_spec(robot_name)
+  sensor_name = "foot_capsule_ground_contact"
+  existing_sensors = cfg_sensors = env_cfg.scene.sensors or ()
+  if any(sensor.name == sensor_name for sensor in cfg_sensors):
+    return
+
+  env_cfg.scene.sensors = existing_sensors + (
+    ContactSensorCfg(
+      name=sensor_name,
+      primary=ContactMatch(
+        mode="geom",
+        pattern=spec.foot_collision_geom_names,
+        entity="robot",
+      ),
+      secondary=ContactMatch(mode="body", pattern="terrain"),
+      fields=("found", "force"),
+      reduce="netforce",
+      num_slots=1,
+      track_air_time=True,
+    ),
+  )
 
 
 def _unwrap_obs(obs: Any) -> Any:
@@ -246,6 +273,7 @@ def run_silent_eval(
   _validate_runtime_support(robot_name)
   env_cfg = load_env_cfg(spec.task_id, play=True)
   env_cfg.scene.num_envs = 1
+  _ensure_capsule_contact_sensor(env_cfg, robot_name)
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
 
   try:

@@ -75,43 +75,85 @@ def save_capsule_distribution_plot(
   output_path: str | Path,
   title: str,
 ) -> Path:
-  """Save a per-capsule footprint distribution plot."""
+  """Save a single 2D footprint distribution plot colored by touchdown peak."""
 
   output = Path(output_path)
   output.parent.mkdir(parents=True, exist_ok=True)
 
-  fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharex=True, sharey=True)
+  fig, axis = plt.subplots(1, 1, figsize=(7, 6))
   fig.suptitle(title)
 
   capsule_xy = trace.capsule_layout_xy_m.cpu().clone()
   capsule_xy = _normalize_capsule_layout(capsule_xy, trace.capsule_names)
-  metrics = (
-    ("Peak / BW", trace.capsule_touchdown_peak_force_bw.cpu()),
-    ("Loading Rate / BW/s", trace.capsule_touchdown_loading_rate_bw_s.cpu()),
-    ("Vertical Speed / m/s", trace.capsule_touchdown_vertical_speed_m_s.cpu()),
+  values = trace.capsule_touchdown_peak_force_bw.cpu()
+  scatter = axis.scatter(
+    capsule_xy[:, 0],
+    capsule_xy[:, 1],
+    c=values,
+    s=130 + 25 * trace.capsule_touchdown_count.cpu(),
+    cmap="viridis",
+    edgecolors="black",
+    linewidths=0.8,
   )
-
-  for axis, (label, values) in zip(axes, metrics, strict=True):
-    scatter = axis.scatter(
-      capsule_xy[:, 0],
-      capsule_xy[:, 1],
-      c=values,
-      s=100 + 20 * trace.capsule_touchdown_count.cpu(),
-      cmap="viridis",
-      edgecolors="black",
-      linewidths=0.5,
+  for idx, (name, xy, value) in enumerate(
+    zip(trace.capsule_names, capsule_xy, values, strict=True),
+    start=1,
+  ):
+    capsule_idx = idx if "left" in name else idx - 7
+    axis.text(
+      xy[0],
+      xy[1],
+      f"{capsule_idx}\n{value:.2f}",
+      ha="center",
+      va="center",
+      fontsize=8,
+      color="white",
     )
-    for idx, (name, xy) in enumerate(zip(trace.capsule_names, capsule_xy, strict=True), start=1):
-      axis.text(xy[0], xy[1], str(idx if "left" in name else idx - 7), ha="center", va="center", fontsize=8, color="white")
-    axis.set_title(label)
-    axis.set_aspect("equal", adjustable="box")
-    axis.grid(True, alpha=0.2)
-    fig.colorbar(scatter, ax=axis, shrink=0.8)
 
-  axes[0].set_ylabel("Lateral Offset (m)")
-  for axis in axes:
-    axis.set_xlabel("Fore-Aft Offset (m)")
+  axis.axvline(0.0, color="black", linewidth=0.8, linestyle="--", alpha=0.4)
+  axis.set_title("Touchdown Peak / BW")
+  axis.set_xlabel("Fore-Aft Offset (m)")
+  axis.set_ylabel("Lateral Offset (m)")
+  axis.set_aspect("equal", adjustable="box")
+  axis.grid(True, alpha=0.2)
+  fig.colorbar(scatter, ax=axis, shrink=0.85, label="Peak / BW")
 
+  fig.tight_layout()
+  fig.savefig(output, dpi=150)
+  plt.close(fig)
+  return output
+
+
+def save_capsule_force_timeseries_plot(
+  trace: EpisodeMetricTrace,
+  output_path: str | Path,
+  title: str,
+  dt: float,
+) -> Path:
+  """Save per-capsule world-z force time series for left and right feet."""
+
+  output = Path(output_path)
+  output.parent.mkdir(parents=True, exist_ok=True)
+
+  time_axis = torch.arange(trace.capsule_z_force_n.shape[0], dtype=torch.float32) * dt
+  fig, axes = plt.subplots(2, 1, figsize=(12, 8), sharex=True, sharey=True)
+  fig.suptitle(title)
+
+  capsule_xy = _normalize_capsule_layout(trace.capsule_layout_xy_m.cpu().clone(), trace.capsule_names)
+  order = torch.argsort(capsule_xy[:, 0])
+
+  for axis, side in zip(axes, ("left", "right"), strict=True):
+    side_indices = [idx for idx in order.tolist() if side in trace.capsule_names[idx]]
+    for idx in side_indices:
+      name = trace.capsule_names[idx]
+      series = trace.capsule_z_force_n[:, idx].cpu()
+      axis.plot(time_axis, series, label=name.replace("_collision", ""))
+    axis.set_title(f"{side.capitalize()} foot capsule Fz")
+    axis.set_ylabel("Force (N)")
+    axis.grid(True, alpha=0.3)
+    axis.legend(loc="upper right", ncol=2, fontsize=8)
+
+  axes[-1].set_xlabel("Time (s)")
   fig.tight_layout()
   fig.savefig(output, dpi=150)
   plt.close(fig)

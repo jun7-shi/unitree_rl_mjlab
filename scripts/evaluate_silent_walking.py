@@ -39,6 +39,7 @@ def main() -> None:
     from src.evaluation.silent_walking.runner import run_silent_eval
     from src.evaluation.silent_walking.plotting import (
       save_capsule_distribution_plot,
+      save_capsule_force_timeseries_plot,
       save_trace_plot,
     )
     from src.evaluation.silent_walking.reporting import render_markdown_report
@@ -88,8 +89,15 @@ def main() -> None:
       Path(args.plot_file).with_name(f"{Path(args.plot_file).stem}_foot_distribution.png"),
       title=f"{result.robot_name}: {Path(args.policy).name} footprint",
     )
+    capsule_force_path = save_capsule_force_timeseries_plot(
+      result.trace,
+      Path(args.plot_file).with_name(f"{Path(args.plot_file).stem}_capsule_force_timeseries.png"),
+      title=f"{result.robot_name}: {Path(args.policy).name} capsule force traces",
+      dt=result.step_dt,
+    )
     print(f"\nPlot saved to: {trace_path}")
     print(f"Foot distribution saved to: {footmap_path}")
+    print(f"Capsule force time series saved to: {capsule_force_path}")
 
 
 if __name__ == "__main__":

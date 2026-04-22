@@ -6,6 +6,7 @@ from src.evaluation.silent_walking.contact_backends import supports_contact_back
 from src.evaluation.silent_walking.runner import (
   _CallablePolicyAdapter,
   _compute_touchdown_metrics,
+  _ensure_capsule_contact_sensor,
   _extract_actor_obs,
   _resolve_policy,
   _validate_runtime_support,
@@ -38,6 +39,31 @@ def test_callable_policy_adapter_wraps_plain_callable():
   out = adapter.act(torch.zeros(1, 3))
 
   assert torch.allclose(out, torch.full((1, 3), 2.0))
+
+
+def test_ensure_capsule_contact_sensor_appends_sensor_once():
+  @dataclass
+  class FakeSensor:
+    name: str
+
+  @dataclass
+  class FakeScene:
+    sensors: tuple[object, ...] = ()
+
+  @dataclass
+  class FakeCfg:
+    scene: FakeScene
+
+  cfg = FakeCfg(scene=FakeScene(sensors=(FakeSensor(name="feet_ground_contact"),)))
+
+  _ensure_capsule_contact_sensor(cfg, "g1")
+  names = [sensor.name for sensor in cfg.scene.sensors]
+
+  assert "foot_capsule_ground_contact" in names
+
+  _ensure_capsule_contact_sensor(cfg, "g1")
+  names = [sensor.name for sensor in cfg.scene.sensors]
+  assert names.count("foot_capsule_ground_contact") == 1
 
 
 def test_resolve_policy_loads_checkpoint_through_runtime_loader(monkeypatch):
