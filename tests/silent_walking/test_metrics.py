@@ -43,3 +43,9 @@ def test_metric_helpers_reject_non_finite_and_invalid_denominators():
       peak_force_bw=torch.tensor([float("inf")]),
       loading_rate_bw_s=torch.tensor([8.0]),
     )
+
+  with pytest.raises(ValueError):
+    compute_contact_quietness_score(
+      peak_force_bw=torch.tensor([-0.1]),
+      loading_rate_bw_s=torch.tensor([8.0]),
+    )

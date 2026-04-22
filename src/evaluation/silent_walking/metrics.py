@@ -31,6 +31,13 @@ def _validate_positive_scalar(name: str, value: float) -> None:
     raise ValueError(f"{name} must be > 0")
 
 
+def _validate_non_negative(name: str, tensor: torch.Tensor) -> None:
+  """Reject physically invalid negative-valued metric inputs."""
+
+  if (tensor < 0).any():
+    raise ValueError(f"{name} must contain only non-negative values")
+
+
 def normalize_force_by_body_weight(
   force_newton: torch.Tensor | float, body_weight_newton: float
 ) -> torch.Tensor:
@@ -68,5 +75,7 @@ def compute_contact_quietness_score(
   loading_rate_tensor = _to_tensor(loading_rate_bw_s)
   _validate_finite("peak_force_bw", peak_force_tensor)
   _validate_finite("loading_rate_bw_s", loading_rate_tensor)
+  _validate_non_negative("peak_force_bw", peak_force_tensor)
+  _validate_non_negative("loading_rate_bw_s", loading_rate_tensor)
   penalty = 0.5 * peak_force_tensor + 0.05 * loading_rate_tensor
   return torch.clamp(1.0 - penalty, min=0.0, max=1.0)
