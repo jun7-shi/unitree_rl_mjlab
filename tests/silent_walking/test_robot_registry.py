@@ -1,3 +1,5 @@
+from pathlib import Path
+
 from src.evaluation.silent_walking import get_robot_spec, list_supported_robots
 
 
@@ -18,3 +20,20 @@ def test_bumi_robot_spec_exists_before_assets():
 
   assert spec.asset_status in {"missing_assets", "ready"}
   assert spec.mass_normalization > 0
+
+
+def test_asset_status_tracks_current_filesystem_state(monkeypatch):
+  spec = get_robot_spec("bumi")
+  original_exists = Path.exists
+  state = {"exists": False}
+
+  def fake_exists(self: Path) -> bool:
+    if self == spec.asset_path:
+      return state["exists"]
+    return original_exists(self)
+
+  monkeypatch.setattr(Path, "exists", fake_exists)
+
+  assert spec.asset_status == "missing_assets"
+  state["exists"] = True
+  assert spec.asset_status == "ready"
