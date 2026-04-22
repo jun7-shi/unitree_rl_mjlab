@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from .types import EpisodeMetricSummary
+from .types import EpisodeMetricSummary, EpisodeMetricTrace
 
 
 def _escape_inline_code(value: str) -> str:
@@ -22,11 +22,14 @@ def _escape_inline_code(value: str) -> str:
 
 
 def render_markdown_report(
-  robot_name: str, policy_label: str, summary: EpisodeMetricSummary
+  robot_name: str,
+  policy_label: str,
+  summary: EpisodeMetricSummary,
+  trace: EpisodeMetricTrace | None = None,
 ) -> str:
   """Render a compact markdown report for one evaluated policy."""
 
-  return f"""# Silent Walking Report
+  report = f"""# Silent Walking Report
 
 - Robot: {_escape_inline_code(robot_name)}
 - Policy: {_escape_inline_code(policy_label)}
@@ -35,3 +38,19 @@ def render_markdown_report(
 - Task Compliance: `{summary.task_compliance:.2f}`
 - Total Score: `{summary.total_score:.2f}`
 """
+
+  if trace is None:
+    return report
+
+  return (
+    report
+    + f"""
+## Raw Metrics
+
+- Peak Force / BW: `{trace.peak_force_bw.mean().item():.2f}`
+- Loading Rate / BW/s: `{trace.loading_rate_bw_s.mean().item():.2f}`
+- Action Rate L2: `{trace.action_rate_l2.mean().item():.2f}`
+- Linear Velocity Error: `{trace.linear_velocity_error.mean().item():.2f}`
+- Yaw Rate Error: `{trace.yaw_rate_error.mean().item():.2f}`
+"""
+  )

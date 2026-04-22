@@ -63,7 +63,14 @@ def main() -> None:
     steps=args.steps,
     device=device,
   )
-  print(render_markdown_report(result.robot_name, args.policy, result.summary))
+  print(
+    render_markdown_report(
+      result.robot_name,
+      args.policy,
+      result.summary,
+      trace=result.trace,
+    )
+  )
 
 
 if __name__ == "__main__":
