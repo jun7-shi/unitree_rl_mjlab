@@ -1,3 +1,4 @@
+import pytest
 import torch
 
 from src.evaluation.silent_walking.metrics import (
@@ -28,3 +29,17 @@ def test_compute_contact_quietness_score_is_bounded():
   )
 
   assert 0.0 <= score.item() <= 1.0
+
+
+def test_metric_helpers_reject_non_finite_and_invalid_denominators():
+  with pytest.raises(ValueError):
+    normalize_force_by_body_weight(torch.tensor([1.0]), body_weight_newton=float("nan"))
+
+  with pytest.raises(ValueError):
+    compute_loading_rate(torch.tensor([1.0, 2.0]), dt=0.0)
+
+  with pytest.raises(ValueError):
+    compute_contact_quietness_score(
+      peak_force_bw=torch.tensor([float("inf")]),
+      loading_rate_bw_s=torch.tensor([8.0]),
+    )
