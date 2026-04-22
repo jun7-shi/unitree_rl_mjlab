@@ -2,7 +2,17 @@
 
 from __future__ import annotations
 
+from typing import Sequence
+
 import torch
+
+
+def _to_tensor(value: torch.Tensor | float | Sequence[float]) -> torch.Tensor:
+  """Convert scalars and sequences to tensors without dropping tensor metadata."""
+
+  if isinstance(value, torch.Tensor):
+    return value
+  return torch.as_tensor(value)
 
 
 def normalize_force_by_body_weight(
@@ -10,16 +20,25 @@ def normalize_force_by_body_weight(
 ) -> torch.Tensor:
   """Normalize a force value by body weight."""
 
-  force_tensor = torch.as_tensor(force_newton, dtype=torch.float32)
+  if body_weight_newton <= 0:
+    raise ValueError("body_weight_newton must be > 0")
+
+  force_tensor = _to_tensor(force_newton)
   return force_tensor / body_weight_newton
 
 
 def compute_loading_rate(
-  force_series: torch.Tensor | list[float], dt: float
+  force_series: torch.Tensor | Sequence[float], dt: float
 ) -> torch.Tensor:
   """Compute a simple loading-rate proxy over a force window."""
 
-  force_tensor = torch.as_tensor(force_series, dtype=torch.float32)
+  if dt <= 0:
+    raise ValueError("dt must be > 0")
+
+  force_tensor = _to_tensor(force_series)
+  if force_tensor.numel() == 0:
+    raise ValueError("force_series must not be empty")
+
   return (force_tensor.max() - force_tensor.min()) / dt
 
 
@@ -29,7 +48,7 @@ def compute_contact_quietness_score(
 ) -> torch.Tensor:
   """Combine normalized peak force and loading rate into a bounded score."""
 
-  peak_force_tensor = torch.as_tensor(peak_force_bw, dtype=torch.float32)
-  loading_rate_tensor = torch.as_tensor(loading_rate_bw_s, dtype=torch.float32)
+  peak_force_tensor = _to_tensor(peak_force_bw)
+  loading_rate_tensor = _to_tensor(loading_rate_bw_s)
   penalty = 0.5 * peak_force_tensor + 0.05 * loading_rate_tensor
   return torch.clamp(1.0 - penalty, min=0.0, max=1.0)
