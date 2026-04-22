@@ -32,6 +32,7 @@ def main() -> None:
     from src.evaluation.silent_walking.policy_adapters import (
       ZeroPolicyAdapter,
       adapt_policy_path,
+      is_checkpoint_path,
     )
     from src.evaluation.silent_walking.reporting import render_markdown_report
     from src.evaluation.silent_walking.robots import get_robot_spec
@@ -51,7 +52,10 @@ def main() -> None:
     policy_path = Path(args.policy)
     if not policy_path.exists():
       raise FileNotFoundError(f"Policy file not found: {policy_path}")
-    policy_adapter = adapt_policy_path(str(policy_path), device=device)
+    if is_checkpoint_path(str(policy_path)):
+      policy_adapter = str(policy_path)
+    else:
+      policy_adapter = adapt_policy_path(str(policy_path), device=device)
 
   result = run_silent_eval(
     robot_name=args.robot,

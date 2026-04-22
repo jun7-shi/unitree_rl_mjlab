@@ -28,6 +28,12 @@ def _requires_cuda_provider(device: str) -> bool:
   return device.lower().startswith("cuda")
 
 
+def is_checkpoint_path(path: str) -> bool:
+  """Return whether the policy path should be loaded as an RSL-RL checkpoint."""
+
+  return Path(path).suffix.lower() == ".pt"
+
+
 class PolicyAdapter(Protocol):
   """Minimal inference interface required by the evaluator."""
 
@@ -100,8 +106,10 @@ def adapt_policy_path(path: str, device: str) -> PolicyAdapter:
   """Create the appropriate policy adapter from a file path."""
 
   suffix = Path(path).suffix.lower()
+  if suffix == ".pt":
+    raise ValueError("Checkpoint .pt files must be loaded through the runtime runner")
   if suffix == ".onnx":
     return OnnxPolicyAdapter(path, device=device)
-  if suffix in {".pt", ".jit"}:
+  if suffix == ".jit":
     return TorchscriptPolicyAdapter(path, device=device)
   raise ValueError(f"Unsupported policy format: {suffix}")

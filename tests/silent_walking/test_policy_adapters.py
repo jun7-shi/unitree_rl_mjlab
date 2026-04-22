@@ -5,6 +5,7 @@ from src.evaluation.silent_walking.policy_adapters import (
   TorchscriptPolicyAdapter,
   ZeroPolicyAdapter,
   adapt_policy_path,
+  is_checkpoint_path,
 )
 
 
@@ -21,6 +22,20 @@ def test_adapt_policy_path_rejects_unknown_suffix():
     adapt_policy_path("policy.invalid", device="cpu")
   except ValueError as exc:
     assert "Unsupported policy format" in str(exc)
+  else:
+    raise AssertionError("Expected ValueError")
+
+
+def test_is_checkpoint_path_matches_pt_only():
+  assert is_checkpoint_path("model_100.pt") is True
+  assert is_checkpoint_path("policy.onnx") is False
+
+
+def test_adapt_policy_path_rejects_checkpoint_pt_files():
+  try:
+    adapt_policy_path("model_100.pt", device="cpu")
+  except ValueError as exc:
+    assert "runtime runner" in str(exc)
   else:
     raise AssertionError("Expected ValueError")
 
