@@ -141,6 +141,24 @@ python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src
 |----------------------------------|--------------------------------|------------------------------------|-----------------------------------|
 | ![go2](doc/gif/go2-velocity.gif) | ![g1](doc/gif/g1-velocity.gif) | ![h1_2](doc/gif/h1_2-velocity.gif) | ![g1_mimic](doc/gif/g1-mimic.gif) |
 
+### 3.1 静音行走 Evaluator
+
+仓库中已经加入了一版早期的 MuJoCo 静音行走 evaluator，代码位于
+`src/evaluation/silent_walking`，命令行入口为：
+
+```bash
+python scripts/evaluate_silent_walking.py --robot g1 --policy zero --steps 1 --device cpu
+```
+
+当前状态：
+- `g1`：在 `unitree_rl_mjlab` conda 环境下已经可以跑通 runtime 路径
+- `bumi`：接口已经预留，但在补齐 MuJoCo 资产和 task wiring 之前会被 runtime gate 拦下
+- 当前 policy 输入支持 `zero`、`*.pt` / `*.jit`、`*.onnx`
+
+说明：
+- evaluator 采用 `metric-canonical`、`runtime-adaptive` 设计，不要求所有 policy 的 observation 或 command 完全一致，但必须能适配到统一运行接口
+- `warp` 和 `matplotlib` 的运行时缓存会自动重定向到可写临时目录
+
 ### 4. 实物部署
 
 实物部署前先确保主机安装了下列通信工具：
@@ -231,4 +249,3 @@ cd deploy/robots/g1/build
 - [rsl_rl](https://github.com/leggedrobotics/rsl_rl.git): 强化学习算法实现。
 - [mujoco_warp](https://github.com/google-deepmind/mujoco_warp.git): 提供 GPU 加速渲染与仿真接口。
 - [mujoco](https://github.com/google-deepmind/mujoco.git): 提供强大仿真功能。
-

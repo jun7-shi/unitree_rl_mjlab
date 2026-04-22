@@ -143,6 +143,24 @@ python scripts/play.py Unitree-G1-Tracking-No-State-Estimation --motion_file=src
 |----------------------------------|--------------------------------|------------------------------------|-----------------------------------|
 | ![go2](doc/gif/go2-velocity.gif) | ![g1](doc/gif/g1-velocity.gif) | ![h1_2](doc/gif/h1_2-velocity.gif) | ![g1_mimic](doc/gif/g1-mimic.gif) |
 
+### 3.1 Silent Walking Evaluator
+
+The repository now includes an early MuJoCo silent-walking evaluator at
+`src/evaluation/silent_walking` with a CLI entrypoint:
+
+```bash
+python scripts/evaluate_silent_walking.py --robot g1 --policy zero --steps 1 --device cpu
+```
+
+Current status:
+- `g1`: runtime path is working in the `unitree_rl_mjlab` conda environment
+- `bumi`: interface is reserved, but runtime evaluation is gated until MuJoCo assets and task wiring are added
+- Policy inputs currently support `zero`, `*.pt` / `*.jit`, and `*.onnx`
+
+Notes:
+- The evaluator is metric-canonical but runtime-adaptive. Policies do not need identical observations or commands as long as they can be adapted to the evaluator runtime interface.
+- Runtime caches for `warp` and `matplotlib` are redirected to writable temporary directories automatically.
+
 ### 4. Real Deployment
 
 Before deployment, install the required communication tools:

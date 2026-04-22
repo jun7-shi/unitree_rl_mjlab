@@ -15,6 +15,7 @@ class RobotSpec:
 
   name: str
   task_id: str
+  action_dim: int
   foot_site_names: tuple[str, ...]
   foot_collision_geom_names: tuple[str, ...]
   asset_path: Path

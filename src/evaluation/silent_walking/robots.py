@@ -20,6 +20,7 @@ ROBOT_REGISTRY: dict[str, RobotSpec] = {
   "g1": RobotSpec(
     name="g1",
     task_id="Unitree-G1-Flat",
+    action_dim=29,
     foot_site_names=("left_foot", "right_foot"),
     foot_collision_geom_names=_foot_collision_geom_names(),
     asset_path=_G1_XML,
@@ -28,6 +29,7 @@ ROBOT_REGISTRY: dict[str, RobotSpec] = {
   "bumi": RobotSpec(
     name="bumi",
     task_id="Unitree-Bumi-Flat",
+    action_dim=12,
     foot_site_names=("left_foot", "right_foot"),
     foot_collision_geom_names=(),
     asset_path=_BUMI_XML,
