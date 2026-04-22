@@ -46,6 +46,8 @@ def test_render_markdown_report_includes_raw_metrics_when_trace_is_present():
   trace = EpisodeMetricTrace(
     peak_force_bw=torch.tensor([1.5]),
     loading_rate_bw_s=torch.tensor([2.5]),
+    touchdown_peak_force_bw=torch.tensor([1.2, 1.8]),
+    touchdown_loading_rate_bw_s=torch.tensor([2.0, 3.0]),
     action_rate_l2=torch.tensor([0.5, 1.5]),
     linear_velocity_error=torch.tensor([0.2]),
     yaw_rate_error=torch.tensor([0.1]),
@@ -57,6 +59,8 @@ def test_render_markdown_report_includes_raw_metrics_when_trace_is_present():
   assert "## Raw Metrics" in report
   assert "Peak Force / BW" in report
   assert "Loading Rate / BW/s" in report
+  assert "Touchdown Peak Force / BW" in report
+  assert "Touchdown Loading Rate / BW/s" in report
   assert "Action Rate L2" in report
   assert "Linear Velocity Error" in report
   assert "Yaw Rate Error" in report

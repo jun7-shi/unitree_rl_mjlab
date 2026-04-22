@@ -49,6 +49,8 @@ def render_markdown_report(
 
 - Peak Force / BW: `{trace.peak_force_bw.mean().item():.2f}`
 - Loading Rate / BW/s: `{trace.loading_rate_bw_s.mean().item():.2f}`
+- Touchdown Peak Force / BW: `{trace.touchdown_peak_force_bw.mean().item():.2f}`
+- Touchdown Loading Rate / BW/s: `{trace.touchdown_loading_rate_bw_s.mean().item():.2f}`
 - Action Rate L2: `{trace.action_rate_l2.mean().item():.2f}`
 - Linear Velocity Error: `{trace.linear_velocity_error.mean().item():.2f}`
 - Yaw Rate Error: `{trace.yaw_rate_error.mean().item():.2f}`

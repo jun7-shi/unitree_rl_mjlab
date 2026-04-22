@@ -30,7 +30,11 @@ from mjlab.tasks.registry import load_rl_cfg, load_runner_cls
 from mjlab.utils.torch import configure_torch_backends
 import src.tasks  # noqa: F401
 
-from .contact_backends import extract_feet_net_forces, supports_contact_backend
+from .contact_backends import (
+  extract_feet_contact_flags,
+  extract_feet_net_forces,
+  supports_contact_backend,
+)
 from .metrics import (
   combine_total_score,
   compute_body_smoothness_score,
@@ -122,6 +126,39 @@ def _step_env(env: ManagerBasedRlEnv, action: torch.Tensor) -> tuple[Any, torch.
   return obs, _extract_actor_obs(obs)
 
 
+def _compute_touchdown_metrics(
+  normal_force_series: torch.Tensor,
+  contact_flag_series: torch.Tensor,
+  dt: float,
+  loading_window_steps: int = 5,
+) -> tuple[torch.Tensor, torch.Tensor]:
+  """Compute per-touchdown peak force and loading rate from per-foot force series."""
+
+  touchdown_peaks: list[torch.Tensor] = []
+  touchdown_rates: list[torch.Tensor] = []
+  num_steps, num_feet = normal_force_series.shape
+
+  for foot_idx in range(num_feet):
+    foot_forces = normal_force_series[:, foot_idx]
+    foot_contacts = contact_flag_series[:, foot_idx]
+    previous_contact = False
+
+    for step_idx in range(num_steps):
+      in_contact = bool(foot_contacts[step_idx].item())
+      if in_contact and not previous_contact:
+        end_idx = min(step_idx + loading_window_steps, num_steps)
+        window = foot_forces[step_idx:end_idx]
+        touchdown_peaks.append(window.max())
+        touchdown_rates.append(compute_loading_rate(window, dt=dt))
+      previous_contact = in_contact
+
+  if not touchdown_peaks:
+    zero = torch.zeros(1, device=normal_force_series.device)
+    return zero, zero
+
+  return torch.stack(touchdown_peaks), torch.stack(touchdown_rates)
+
+
 def _load_checkpoint_policy(
   task_id: str,
   env: ManagerBasedRlEnv,
@@ -184,6 +221,7 @@ def run_silent_eval(
     policy.reset()
 
     peak_force_samples: list[torch.Tensor] = []
+    contact_flag_samples: list[torch.Tensor] = []
     action_rate_samples: list[torch.Tensor] = []
     linear_velocity_error_samples: list[torch.Tensor] = []
     yaw_rate_error_samples: list[torch.Tensor] = []
@@ -201,7 +239,9 @@ def run_silent_eval(
       previous_action = action.detach().clone()
       raw_obs, obs = _step_env(env, action)
       foot_force = extract_feet_net_forces(env, robot_name=robot_name)
-      peak_force_samples.append(foot_force[..., 2].abs().max(dim=1).values.squeeze(0))
+      foot_contact = extract_feet_contact_flags(env, robot_name=robot_name)
+      peak_force_samples.append(foot_force[..., 2].abs().squeeze(0))
+      contact_flag_samples.append(foot_contact.squeeze(0))
 
       twist_command = env.command_manager.get_command("twist")
       if twist_command is None:
@@ -218,20 +258,28 @@ def run_silent_eval(
       )
 
     peak_force_series = torch.stack(peak_force_samples)
+    contact_flag_series = torch.stack(contact_flag_samples)
     action_rate_series = torch.stack(action_rate_samples)
     linear_velocity_error_series = torch.stack(linear_velocity_error_samples)
     yaw_rate_error_series = torch.stack(yaw_rate_error_samples)
-    peak_force_bw = normalize_force_by_body_weight(
-      peak_force_series.max(),
-      body_weight_newton=spec.mass_normalization,
-    )
-    loading_rate_bw_s = compute_loading_rate(
-      normalize_force_by_body_weight(
-        peak_force_series.flatten(),
-        body_weight_newton=spec.mass_normalization,
-      ),
+    touchdown_peak_force, touchdown_loading_rate = _compute_touchdown_metrics(
+      peak_force_series,
+      contact_flag_series,
       dt=env.step_dt,
     )
+    peak_force_bw = normalize_force_by_body_weight(
+      touchdown_peak_force.mean(),
+      body_weight_newton=spec.mass_normalization,
+    )
+    touchdown_peak_force_bw = normalize_force_by_body_weight(
+      touchdown_peak_force,
+      body_weight_newton=spec.mass_normalization,
+    )
+    touchdown_loading_rate_bw_s = normalize_force_by_body_weight(
+      touchdown_loading_rate,
+      body_weight_newton=spec.mass_normalization,
+    )
+    loading_rate_bw_s = touchdown_loading_rate_bw_s.mean()
     contact_quietness = compute_contact_quietness_score(
       peak_force_bw=peak_force_bw,
       loading_rate_bw_s=loading_rate_bw_s,
@@ -249,6 +297,8 @@ def run_silent_eval(
     trace = EpisodeMetricTrace(
       peak_force_bw=peak_force_bw.reshape(1),
       loading_rate_bw_s=loading_rate_bw_s.reshape(1),
+      touchdown_peak_force_bw=touchdown_peak_force_bw.flatten(),
+      touchdown_loading_rate_bw_s=touchdown_loading_rate_bw_s.flatten(),
       action_rate_l2=action_rate_series.flatten(),
       linear_velocity_error=linear_velocity_error_series.flatten(),
       yaw_rate_error=yaw_rate_error_series.flatten(),

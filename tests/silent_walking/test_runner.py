@@ -5,6 +5,7 @@ import torch
 from src.evaluation.silent_walking.contact_backends import supports_contact_backend
 from src.evaluation.silent_walking.runner import (
   _CallablePolicyAdapter,
+  _compute_touchdown_metrics,
   _extract_actor_obs,
   _resolve_policy,
   _validate_runtime_support,
@@ -112,3 +113,33 @@ def test_load_checkpoint_policy_uses_runner(monkeypatch):
   )
   assert FakeRunner.policy_device == "cpu"
   assert torch.allclose(policy(torch.zeros(1, 4)), torch.full((1, 4), 2.0))
+
+
+def test_compute_touchdown_metrics_extracts_event_windows():
+  forces = torch.tensor(
+    [
+      [0.0, 0.0],
+      [10.0, 0.0],
+      [20.0, 5.0],
+      [15.0, 8.0],
+      [0.0, 0.0],
+      [0.0, 12.0],
+      [0.0, 18.0],
+    ]
+  )
+  contacts = torch.tensor(
+    [
+      [False, False],
+      [True, False],
+      [True, True],
+      [True, True],
+      [False, False],
+      [False, True],
+      [False, True],
+    ]
+  )
+
+  peaks, rates = _compute_touchdown_metrics(forces, contacts, dt=0.02, loading_window_steps=3)
+
+  assert torch.allclose(peaks, torch.tensor([20.0, 8.0, 18.0]))
+  assert torch.allclose(rates, torch.tensor([500.0, 400.0, 300.0]))

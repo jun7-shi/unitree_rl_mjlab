@@ -31,6 +31,22 @@ def extract_feet_net_forces(env, robot_name: str) -> torch.Tensor:
   return force
 
 
+def extract_feet_contact_flags(env, robot_name: str) -> torch.Tensor:
+  """Extract per-foot contact presence flags from the configured contact sensor."""
+
+  if not supports_contact_backend(robot_name):
+    spec = get_robot_spec(robot_name)
+    raise NotImplementedError(
+      f"Contact extraction is not implemented yet for robot '{spec.name}'"
+    )
+
+  sensor: ContactSensor = env.scene["feet_ground_contact"]
+  found = sensor.data.found
+  if found is None:
+    raise RuntimeError("feet_ground_contact found data is unavailable")
+  return found > 0
+
+
 def extract_g1_feet_net_forces(env) -> torch.Tensor:
   """Return G1 foot contact net forces with shape [num_envs, 2, 3]."""
 
