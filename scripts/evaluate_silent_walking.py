@@ -19,6 +19,7 @@ def build_parser() -> argparse.ArgumentParser:
   parser.add_argument("--policy", required=True)
   parser.add_argument("--steps", type=int, default=500)
   parser.add_argument("--device", default=None)
+  parser.add_argument("--plot-file", default=None)
   return parser
 
 
@@ -34,6 +35,7 @@ def main() -> None:
       adapt_policy_path,
       is_checkpoint_path,
     )
+    from src.evaluation.silent_walking.plotting import save_trace_plot
     from src.evaluation.silent_walking.reporting import render_markdown_report
     from src.evaluation.silent_walking.robots import get_robot_spec
     from src.evaluation.silent_walking.runner import run_silent_eval
@@ -71,6 +73,14 @@ def main() -> None:
       trace=result.trace,
     )
   )
+  if args.plot_file is not None:
+    save_trace_plot(
+      result.trace,
+      args.plot_file,
+      title=f"{result.robot_name}: {Path(args.policy).name}",
+      dt=0.02,
+    )
+    print(f"\nPlot saved to: {args.plot_file}")
 
 
 if __name__ == "__main__":

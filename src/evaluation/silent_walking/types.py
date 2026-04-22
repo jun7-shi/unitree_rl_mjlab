@@ -53,6 +53,8 @@ class EpisodeMetricSummary:
 class EpisodeMetricTrace:
   """Metric-canonical raw values collected across one evaluation episode."""
 
+  foot_z_force_n: torch.Tensor
+  foot_contact_flag: torch.Tensor
   peak_force_bw: torch.Tensor
   loading_rate_bw_s: torch.Tensor
   touchdown_peak_force_bw: torch.Tensor
@@ -63,6 +65,9 @@ class EpisodeMetricTrace:
   right_touchdown_loading_rate_bw_s: torch.Tensor
   touchdown_peak_asymmetry_bw: torch.Tensor
   action_rate_l2: torch.Tensor
+  command_velocity: torch.Tensor
+  actual_linear_velocity: torch.Tensor
+  actual_yaw_rate: torch.Tensor
   linear_velocity_error: torch.Tensor
   yaw_rate_error: torch.Tensor
   contact_quietness_score: torch.Tensor

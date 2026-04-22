@@ -229,6 +229,9 @@ def run_silent_eval(
     peak_force_samples: list[torch.Tensor] = []
     contact_flag_samples: list[torch.Tensor] = []
     action_rate_samples: list[torch.Tensor] = []
+    command_velocity_samples: list[torch.Tensor] = []
+    actual_linear_velocity_samples: list[torch.Tensor] = []
+    actual_yaw_rate_samples: list[torch.Tensor] = []
     linear_velocity_error_samples: list[torch.Tensor] = []
     yaw_rate_error_samples: list[torch.Tensor] = []
     previous_action: torch.Tensor | None = None
@@ -253,6 +256,13 @@ def run_silent_eval(
       if twist_command is None:
         raise RuntimeError("Velocity evaluation requires a 'twist' command term")
       robot = env.scene["robot"]
+      command_velocity_samples.append(twist_command.squeeze(0).detach().clone())
+      actual_linear_velocity_samples.append(
+        robot.data.root_link_lin_vel_b[:, :2].squeeze(0).detach().clone()
+      )
+      actual_yaw_rate_samples.append(
+        robot.data.root_link_ang_vel_b[:, 2].squeeze(0).detach().clone()
+      )
       linear_velocity_error_samples.append(
         torch.linalg.norm(
           twist_command[:, :2] - robot.data.root_link_lin_vel_b[:, :2],
@@ -266,6 +276,9 @@ def run_silent_eval(
     peak_force_series = torch.stack(peak_force_samples)
     contact_flag_series = torch.stack(contact_flag_samples)
     action_rate_series = torch.stack(action_rate_samples)
+    command_velocity_series = torch.stack(command_velocity_samples)
+    actual_linear_velocity_series = torch.stack(actual_linear_velocity_samples)
+    actual_yaw_rate_series = torch.stack(actual_yaw_rate_samples)
     linear_velocity_error_series = torch.stack(linear_velocity_error_samples)
     yaw_rate_error_series = torch.stack(yaw_rate_error_samples)
     touchdown_peak_force_by_foot, touchdown_loading_rate_by_foot = _compute_touchdown_metrics(
@@ -326,6 +339,8 @@ def run_silent_eval(
       task_compliance,
     )
     trace = EpisodeMetricTrace(
+      foot_z_force_n=peak_force_series,
+      foot_contact_flag=contact_flag_series.float(),
       peak_force_bw=peak_force_bw.reshape(1),
       loading_rate_bw_s=loading_rate_bw_s.reshape(1),
       touchdown_peak_force_bw=touchdown_peak_force_bw.flatten(),
@@ -336,6 +351,9 @@ def run_silent_eval(
       right_touchdown_loading_rate_bw_s=right_touchdown_loading_rate_bw_s.flatten(),
       touchdown_peak_asymmetry_bw=touchdown_peak_asymmetry_bw,
       action_rate_l2=action_rate_series.flatten(),
+      command_velocity=command_velocity_series,
+      actual_linear_velocity=actual_linear_velocity_series,
+      actual_yaw_rate=actual_yaw_rate_series.flatten(),
       linear_velocity_error=linear_velocity_error_series.flatten(),
       yaw_rate_error=yaw_rate_error_series.flatten(),
       contact_quietness_score=contact_quietness.reshape(1),

@@ -44,6 +44,8 @@ def test_render_markdown_report_includes_raw_metrics_when_trace_is_present():
     total_score=0.40,
   )
   trace = EpisodeMetricTrace(
+    foot_z_force_n=torch.tensor([[10.0, 12.0], [0.0, 8.0]]),
+    foot_contact_flag=torch.tensor([[1.0, 1.0], [0.0, 1.0]]),
     peak_force_bw=torch.tensor([1.5]),
     loading_rate_bw_s=torch.tensor([2.5]),
     touchdown_peak_force_bw=torch.tensor([1.2, 1.8]),
@@ -54,6 +56,9 @@ def test_render_markdown_report_includes_raw_metrics_when_trace_is_present():
     right_touchdown_loading_rate_bw_s=torch.tensor([3.0]),
     touchdown_peak_asymmetry_bw=torch.tensor([0.6]),
     action_rate_l2=torch.tensor([0.5, 1.5]),
+    command_velocity=torch.tensor([[0.3, 0.0, 0.1], [0.2, 0.0, 0.1]]),
+    actual_linear_velocity=torch.tensor([[0.2, 0.0], [0.1, 0.0]]),
+    actual_yaw_rate=torch.tensor([0.08, 0.09]),
     linear_velocity_error=torch.tensor([0.2]),
     yaw_rate_error=torch.tensor([0.1]),
     contact_quietness_score=torch.tensor([0.1]),
