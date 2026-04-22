@@ -57,6 +57,11 @@ class EpisodeMetricTrace:
   loading_rate_bw_s: torch.Tensor
   touchdown_peak_force_bw: torch.Tensor
   touchdown_loading_rate_bw_s: torch.Tensor
+  left_touchdown_peak_force_bw: torch.Tensor
+  right_touchdown_peak_force_bw: torch.Tensor
+  left_touchdown_loading_rate_bw_s: torch.Tensor
+  right_touchdown_loading_rate_bw_s: torch.Tensor
+  touchdown_peak_asymmetry_bw: torch.Tensor
   action_rate_l2: torch.Tensor
   linear_velocity_error: torch.Tensor
   yaw_rate_error: torch.Tensor

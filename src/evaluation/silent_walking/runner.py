@@ -131,7 +131,7 @@ def _compute_touchdown_metrics(
   contact_flag_series: torch.Tensor,
   dt: float,
   loading_window_steps: int = 5,
-) -> tuple[torch.Tensor, torch.Tensor]:
+) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
   """Compute per-touchdown peak force and loading rate from per-foot force series."""
 
   touchdown_peaks: list[torch.Tensor] = []
@@ -139,6 +139,8 @@ def _compute_touchdown_metrics(
   num_steps, num_feet = normal_force_series.shape
 
   for foot_idx in range(num_feet):
+    foot_touchdown_peaks: list[torch.Tensor] = []
+    foot_touchdown_rates: list[torch.Tensor] = []
     foot_forces = normal_force_series[:, foot_idx]
     foot_contacts = contact_flag_series[:, foot_idx]
     previous_contact = False
@@ -148,15 +150,19 @@ def _compute_touchdown_metrics(
       if in_contact and not previous_contact:
         end_idx = min(step_idx + loading_window_steps, num_steps)
         window = foot_forces[step_idx:end_idx]
-        touchdown_peaks.append(window.max())
-        touchdown_rates.append(compute_loading_rate(window, dt=dt))
+        foot_touchdown_peaks.append(window.max())
+        foot_touchdown_rates.append(compute_loading_rate(window, dt=dt))
       previous_contact = in_contact
 
-  if not touchdown_peaks:
-    zero = torch.zeros(1, device=normal_force_series.device)
-    return zero, zero
+    if foot_touchdown_peaks:
+      touchdown_peaks.append(torch.stack(foot_touchdown_peaks))
+      touchdown_rates.append(torch.stack(foot_touchdown_rates))
+    else:
+      zero = torch.zeros(1, device=normal_force_series.device)
+      touchdown_peaks.append(zero)
+      touchdown_rates.append(zero)
 
-  return torch.stack(touchdown_peaks), torch.stack(touchdown_rates)
+  return touchdown_peaks, touchdown_rates
 
 
 def _load_checkpoint_policy(
@@ -262,11 +268,17 @@ def run_silent_eval(
     action_rate_series = torch.stack(action_rate_samples)
     linear_velocity_error_series = torch.stack(linear_velocity_error_samples)
     yaw_rate_error_series = torch.stack(yaw_rate_error_samples)
-    touchdown_peak_force, touchdown_loading_rate = _compute_touchdown_metrics(
+    touchdown_peak_force_by_foot, touchdown_loading_rate_by_foot = _compute_touchdown_metrics(
       peak_force_series,
       contact_flag_series,
       dt=env.step_dt,
     )
+    left_touchdown_peak_force = touchdown_peak_force_by_foot[0]
+    right_touchdown_peak_force = touchdown_peak_force_by_foot[1]
+    left_touchdown_loading_rate = touchdown_loading_rate_by_foot[0]
+    right_touchdown_loading_rate = touchdown_loading_rate_by_foot[1]
+    touchdown_peak_force = torch.cat(touchdown_peak_force_by_foot)
+    touchdown_loading_rate = torch.cat(touchdown_loading_rate_by_foot)
     peak_force_bw = normalize_force_by_body_weight(
       touchdown_peak_force.mean(),
       body_weight_newton=spec.mass_normalization,
@@ -279,6 +291,25 @@ def run_silent_eval(
       touchdown_loading_rate,
       body_weight_newton=spec.mass_normalization,
     )
+    left_touchdown_peak_force_bw = normalize_force_by_body_weight(
+      left_touchdown_peak_force,
+      body_weight_newton=spec.mass_normalization,
+    )
+    right_touchdown_peak_force_bw = normalize_force_by_body_weight(
+      right_touchdown_peak_force,
+      body_weight_newton=spec.mass_normalization,
+    )
+    left_touchdown_loading_rate_bw_s = normalize_force_by_body_weight(
+      left_touchdown_loading_rate,
+      body_weight_newton=spec.mass_normalization,
+    )
+    right_touchdown_loading_rate_bw_s = normalize_force_by_body_weight(
+      right_touchdown_loading_rate,
+      body_weight_newton=spec.mass_normalization,
+    )
+    touchdown_peak_asymmetry_bw = torch.abs(
+      left_touchdown_peak_force_bw.mean() - right_touchdown_peak_force_bw.mean()
+    ).reshape(1)
     loading_rate_bw_s = touchdown_loading_rate_bw_s.mean()
     contact_quietness = compute_contact_quietness_score(
       peak_force_bw=peak_force_bw,
@@ -299,6 +330,11 @@ def run_silent_eval(
       loading_rate_bw_s=loading_rate_bw_s.reshape(1),
       touchdown_peak_force_bw=touchdown_peak_force_bw.flatten(),
       touchdown_loading_rate_bw_s=touchdown_loading_rate_bw_s.flatten(),
+      left_touchdown_peak_force_bw=left_touchdown_peak_force_bw.flatten(),
+      right_touchdown_peak_force_bw=right_touchdown_peak_force_bw.flatten(),
+      left_touchdown_loading_rate_bw_s=left_touchdown_loading_rate_bw_s.flatten(),
+      right_touchdown_loading_rate_bw_s=right_touchdown_loading_rate_bw_s.flatten(),
+      touchdown_peak_asymmetry_bw=touchdown_peak_asymmetry_bw,
       action_rate_l2=action_rate_series.flatten(),
       linear_velocity_error=linear_velocity_error_series.flatten(),
       yaw_rate_error=yaw_rate_error_series.flatten(),

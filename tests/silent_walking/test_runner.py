@@ -139,7 +139,13 @@ def test_compute_touchdown_metrics_extracts_event_windows():
     ]
   )
 
-  peaks, rates = _compute_touchdown_metrics(forces, contacts, dt=0.02, loading_window_steps=3)
+  peaks, rates = _compute_touchdown_metrics(
+    forces, contacts, dt=0.02, loading_window_steps=3
+  )
 
-  assert torch.allclose(peaks, torch.tensor([20.0, 8.0, 18.0]))
-  assert torch.allclose(rates, torch.tensor([500.0, 400.0, 300.0]))
+  assert len(peaks) == 2
+  assert len(rates) == 2
+  assert torch.allclose(peaks[0], torch.tensor([20.0]))
+  assert torch.allclose(peaks[1], torch.tensor([8.0, 18.0]))
+  assert torch.allclose(rates[0], torch.tensor([500.0]))
+  assert torch.allclose(rates[1], torch.tensor([400.0, 300.0]))

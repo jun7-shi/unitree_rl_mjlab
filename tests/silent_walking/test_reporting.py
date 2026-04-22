@@ -48,6 +48,11 @@ def test_render_markdown_report_includes_raw_metrics_when_trace_is_present():
     loading_rate_bw_s=torch.tensor([2.5]),
     touchdown_peak_force_bw=torch.tensor([1.2, 1.8]),
     touchdown_loading_rate_bw_s=torch.tensor([2.0, 3.0]),
+    left_touchdown_peak_force_bw=torch.tensor([1.2]),
+    right_touchdown_peak_force_bw=torch.tensor([1.8]),
+    left_touchdown_loading_rate_bw_s=torch.tensor([2.0]),
+    right_touchdown_loading_rate_bw_s=torch.tensor([3.0]),
+    touchdown_peak_asymmetry_bw=torch.tensor([0.6]),
     action_rate_l2=torch.tensor([0.5, 1.5]),
     linear_velocity_error=torch.tensor([0.2]),
     yaw_rate_error=torch.tensor([0.1]),
@@ -61,6 +66,9 @@ def test_render_markdown_report_includes_raw_metrics_when_trace_is_present():
   assert "Loading Rate / BW/s" in report
   assert "Touchdown Peak Force / BW" in report
   assert "Touchdown Loading Rate / BW/s" in report
+  assert "Left Touchdown Peak / BW" in report
+  assert "Right Touchdown Peak / BW" in report
+  assert "Touchdown Peak Asymmetry / BW" in report
   assert "Action Rate L2" in report
   assert "Linear Velocity Error" in report
   assert "Yaw Rate Error" in report
