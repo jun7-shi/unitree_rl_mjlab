@@ -79,3 +79,43 @@ def compute_contact_quietness_score(
   _validate_non_negative("loading_rate_bw_s", loading_rate_tensor)
   penalty = 0.5 * peak_force_tensor + 0.05 * loading_rate_tensor
   return torch.clamp(1.0 - penalty, min=0.0, max=1.0)
+
+
+def compute_body_smoothness_score(
+  action_rate_l2: torch.Tensor | float,
+) -> torch.Tensor:
+  """Map action-rate magnitude to a bounded smoothness score."""
+
+  action_rate_tensor = _to_tensor(action_rate_l2)
+  _validate_finite("action_rate_l2", action_rate_tensor)
+  _validate_non_negative("action_rate_l2", action_rate_tensor)
+  return torch.exp(-0.5 * action_rate_tensor)
+
+
+def compute_task_compliance_score(
+  linear_velocity_error: torch.Tensor | float,
+  yaw_rate_error: torch.Tensor | float,
+) -> torch.Tensor:
+  """Map tracking errors to a bounded task-compliance score."""
+
+  linear_error_tensor = _to_tensor(linear_velocity_error)
+  yaw_error_tensor = _to_tensor(yaw_rate_error)
+  _validate_finite("linear_velocity_error", linear_error_tensor)
+  _validate_finite("yaw_rate_error", yaw_error_tensor)
+  _validate_non_negative("linear_velocity_error", linear_error_tensor)
+  _validate_non_negative("yaw_rate_error", yaw_error_tensor)
+  return torch.exp(-(linear_error_tensor + 0.5 * yaw_error_tensor))
+
+
+def combine_total_score(
+  contact_quietness: torch.Tensor | float,
+  body_smoothness: torch.Tensor | float,
+  task_compliance: torch.Tensor | float,
+) -> torch.Tensor:
+  """Combine the three bounded sub-scores into one total score."""
+
+  return (
+    _to_tensor(contact_quietness)
+    + _to_tensor(body_smoothness)
+    + _to_tensor(task_compliance)
+  ) / 3.0

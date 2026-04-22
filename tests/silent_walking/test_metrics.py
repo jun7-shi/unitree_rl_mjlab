@@ -2,8 +2,11 @@ import pytest
 import torch
 
 from src.evaluation.silent_walking.metrics import (
+  combine_total_score,
+  compute_body_smoothness_score,
   compute_contact_quietness_score,
   compute_loading_rate,
+  compute_task_compliance_score,
   normalize_force_by_body_weight,
 )
 
@@ -49,3 +52,23 @@ def test_metric_helpers_reject_non_finite_and_invalid_denominators():
       peak_force_bw=torch.tensor([-0.1]),
       loading_rate_bw_s=torch.tensor([8.0]),
     )
+
+
+def test_body_smoothness_score_decreases_with_action_rate():
+  low = compute_body_smoothness_score(torch.tensor([0.1]))
+  high = compute_body_smoothness_score(torch.tensor([1.0]))
+
+  assert low.item() > high.item()
+
+
+def test_task_compliance_score_decreases_with_tracking_error():
+  low_error = compute_task_compliance_score(torch.tensor([0.1]), torch.tensor([0.1]))
+  high_error = compute_task_compliance_score(torch.tensor([1.0]), torch.tensor([1.0]))
+
+  assert low_error.item() > high_error.item()
+
+
+def test_combine_total_score_averages_subscores():
+  total = combine_total_score(0.9, 0.6, 0.3)
+
+  assert torch.allclose(total, torch.tensor(0.6))

@@ -32,8 +32,11 @@ import src.tasks  # noqa: F401
 
 from .contact_backends import extract_feet_net_forces, supports_contact_backend
 from .metrics import (
+  combine_total_score,
+  compute_body_smoothness_score,
   compute_contact_quietness_score,
   compute_loading_rate,
+  compute_task_compliance_score,
   normalize_force_by_body_weight,
 )
 from .policy_adapters import PolicyAdapter, adapt_policy_path, is_checkpoint_path
@@ -181,15 +184,43 @@ def run_silent_eval(
     policy.reset()
 
     peak_force_samples: list[torch.Tensor] = []
+    action_rate_samples: list[torch.Tensor] = []
+    linear_velocity_error_samples: list[torch.Tensor] = []
+    yaw_rate_error_samples: list[torch.Tensor] = []
+    previous_action: torch.Tensor | None = None
 
     for _ in range(steps):
       policy_obs = _unwrap_obs(raw_obs) if getattr(policy, "use_raw_obs", False) else obs
       action = policy.act(policy_obs)
+      if previous_action is None:
+        action_rate_samples.append(torch.zeros(1, device=action.device))
+      else:
+        action_rate_samples.append(
+          torch.linalg.norm(action - previous_action, dim=1)
+        )
+      previous_action = action.detach().clone()
       raw_obs, obs = _step_env(env, action)
       foot_force = extract_feet_net_forces(env, robot_name=robot_name)
       peak_force_samples.append(foot_force[..., 2].abs().max(dim=1).values.squeeze(0))
 
+      twist_command = env.command_manager.get_command("twist")
+      if twist_command is None:
+        raise RuntimeError("Velocity evaluation requires a 'twist' command term")
+      robot = env.scene["robot"]
+      linear_velocity_error_samples.append(
+        torch.linalg.norm(
+          twist_command[:, :2] - robot.data.root_link_lin_vel_b[:, :2],
+          dim=1,
+        )
+      )
+      yaw_rate_error_samples.append(
+        torch.abs(twist_command[:, 2] - robot.data.root_link_ang_vel_b[:, 2])
+      )
+
     peak_force_series = torch.stack(peak_force_samples)
+    action_rate_series = torch.stack(action_rate_samples)
+    linear_velocity_error_series = torch.stack(linear_velocity_error_samples)
+    yaw_rate_error_series = torch.stack(yaw_rate_error_samples)
     peak_force_bw = normalize_force_by_body_weight(
       peak_force_series.max(),
       body_weight_newton=spec.mass_normalization,
@@ -205,16 +236,29 @@ def run_silent_eval(
       peak_force_bw=peak_force_bw,
       loading_rate_bw_s=loading_rate_bw_s,
     )
+    body_smoothness = compute_body_smoothness_score(action_rate_series.mean())
+    task_compliance = compute_task_compliance_score(
+      linear_velocity_error_series.mean(),
+      yaw_rate_error_series.mean(),
+    )
+    total_score = combine_total_score(
+      contact_quietness,
+      body_smoothness,
+      task_compliance,
+    )
     trace = EpisodeMetricTrace(
       peak_force_bw=peak_force_bw.reshape(1),
       loading_rate_bw_s=loading_rate_bw_s.reshape(1),
+      action_rate_l2=action_rate_series.flatten(),
+      linear_velocity_error=linear_velocity_error_series.flatten(),
+      yaw_rate_error=yaw_rate_error_series.flatten(),
       contact_quietness_score=contact_quietness.reshape(1),
     )
     summary = EpisodeMetricSummary(
       contact_quietness=float(contact_quietness.item()),
-      body_smoothness=0.0,
-      task_compliance=0.0,
-      total_score=float(contact_quietness.item()),
+      body_smoothness=float(body_smoothness.item()),
+      task_compliance=float(task_compliance.item()),
+      total_score=float(total_score.item()),
     )
     return SilentEvalResult(
       robot_name=robot_name,

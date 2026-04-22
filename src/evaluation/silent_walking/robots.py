@@ -1,11 +1,28 @@
 """Robot registry for silent walking evaluation."""
 
+import xml.etree.ElementTree as ET
+
 from src import SRC_PATH
 
 from .types import RobotSpec
 
 _G1_XML = SRC_PATH / "assets" / "robots" / "unitree_g1" / "xmls" / "g1.xml"
 _BUMI_XML = SRC_PATH / "assets" / "robots" / "unitree_bumi" / "xmls" / "bumi.xml"
+
+
+def _mass_normalization_from_xml(xml_path, fallback: float = 1.0) -> float:
+  if not xml_path.exists():
+    return fallback
+
+  root = ET.parse(xml_path).getroot()
+  total_mass = sum(
+    float(node.attrib["mass"])
+    for node in root.iter("inertial")
+    if "mass" in node.attrib
+  )
+  if total_mass <= 0:
+    return fallback
+  return total_mass * 9.81
 
 
 def _foot_collision_geom_names() -> tuple[str, ...]:
@@ -24,7 +41,7 @@ ROBOT_REGISTRY: dict[str, RobotSpec] = {
     foot_site_names=("left_foot", "right_foot"),
     foot_collision_geom_names=_foot_collision_geom_names(),
     asset_path=_G1_XML,
-    mass_normalization=1.0,
+    mass_normalization=_mass_normalization_from_xml(_G1_XML),
   ),
   "bumi": RobotSpec(
     name="bumi",

@@ -55,4 +55,7 @@ class EpisodeMetricTrace:
 
   peak_force_bw: torch.Tensor
   loading_rate_bw_s: torch.Tensor
+  action_rate_l2: torch.Tensor
+  linear_velocity_error: torch.Tensor
+  yaw_rate_error: torch.Tensor
   contact_quietness_score: torch.Tensor
