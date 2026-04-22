@@ -31,5 +31,5 @@ def test_render_markdown_report_escapes_backticks_in_labels():
 
   report = render_markdown_report("g`1", "policy`.onnx", summary)
 
-  assert "`g\\`1`" in report
-  assert "`policy\\`.onnx`" in report
+  assert "``g`1``" in report
+  assert "``policy`.onnx``" in report
