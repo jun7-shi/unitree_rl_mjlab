@@ -22,6 +22,12 @@ def _onnx_providers_for_device(device: str) -> list[str]:
   return ["CPUExecutionProvider"]
 
 
+def _requires_cuda_provider(device: str) -> bool:
+  """Return whether the requested device expects CUDA-backed ONNX execution."""
+
+  return device.lower().startswith("cuda")
+
+
 class PolicyAdapter(Protocol):
   """Minimal inference interface required by the evaluator."""
 
@@ -74,6 +80,11 @@ class OnnxPolicyAdapter:
       path,
       providers=_onnx_providers_for_device(device),
     )
+    active_providers = self._session.get_providers()
+    if _requires_cuda_provider(device) and "CUDAExecutionProvider" not in active_providers:
+      raise RuntimeError(
+        f"Requested ONNX device '{device}' but CUDAExecutionProvider is not active"
+      )
     self._input_name = self._session.get_inputs()[0].name
 
   def reset(self) -> None:

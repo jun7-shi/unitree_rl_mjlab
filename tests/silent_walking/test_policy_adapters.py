@@ -47,6 +47,9 @@ def test_onnx_policy_adapter_uses_device_specific_providers(monkeypatch):
       self.path = path
       self.providers = providers
 
+    def get_providers(self):
+      return ["CPUExecutionProvider"]
+
     def get_inputs(self):
       class FakeInput:
         name = "obs"
@@ -64,9 +67,42 @@ def test_onnx_policy_adapter_uses_device_specific_providers(monkeypatch):
     FakeOrt(),
   )
 
-  adapter = OnnxPolicyAdapter("policy.onnx", device="cuda:0")
+  try:
+    OnnxPolicyAdapter("policy.onnx", device="cuda:0")
+  except RuntimeError as exc:
+    assert "CUDAExecutionProvider is not active" in str(exc)
+  else:
+    raise AssertionError("Expected RuntimeError")
 
-  assert adapter._session.providers == [
-    "CUDAExecutionProvider",
-    "CPUExecutionProvider",
-  ]
+
+def test_onnx_policy_adapter_runs_inference_on_cpu(monkeypatch):
+  class FakeSession:
+    def __init__(self, path, providers):
+      self.path = path
+      self.providers = providers
+
+    def get_providers(self):
+      return ["CPUExecutionProvider"]
+
+    def get_inputs(self):
+      class FakeInput:
+        name = "obs"
+
+      return [FakeInput()]
+
+    def run(self, _, inputs):
+      return [inputs["obs"]]
+
+  class FakeOrt:
+    InferenceSession = FakeSession
+
+  monkeypatch.setattr(
+    "src.evaluation.silent_walking.policy_adapters.ort",
+    FakeOrt(),
+  )
+
+  adapter = OnnxPolicyAdapter("policy.onnx", device="cpu")
+  out = adapter.act(torch.ones(1, 4))
+
+  assert adapter._session.providers == ["CPUExecutionProvider"]
+  assert torch.allclose(out, torch.ones(1, 4))
