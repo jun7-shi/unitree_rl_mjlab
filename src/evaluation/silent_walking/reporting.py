@@ -42,6 +42,21 @@ def render_markdown_report(
   if trace is None:
     return report
 
+  capsule_rows = "\n".join(
+    (
+      f"| {_escape_inline_code(name)} | `{int(count.item())}` | "
+      f"`{peak.item():.2f}` | `{rate.item():.2f}` | `{speed.item():.2f}` |"
+    )
+    for name, count, peak, rate, speed in zip(
+      trace.capsule_names,
+      trace.capsule_touchdown_count,
+      trace.capsule_touchdown_peak_force_bw,
+      trace.capsule_touchdown_loading_rate_bw_s,
+      trace.capsule_touchdown_vertical_speed_m_s,
+      strict=True,
+    )
+  )
+
   return (
     report
     + f"""
@@ -51,13 +66,22 @@ def render_markdown_report(
 - Loading Rate / BW/s: `{trace.loading_rate_bw_s.mean().item():.2f}`
 - Touchdown Peak Force / BW: `{trace.touchdown_peak_force_bw.mean().item():.2f}`
 - Touchdown Loading Rate / BW/s: `{trace.touchdown_loading_rate_bw_s.mean().item():.2f}`
+- Touchdown Vertical Speed / m/s: `{trace.touchdown_vertical_speed_m_s.mean().item():.2f}`
 - Left Touchdown Peak / BW: `{trace.left_touchdown_peak_force_bw.mean().item():.2f}`
 - Right Touchdown Peak / BW: `{trace.right_touchdown_peak_force_bw.mean().item():.2f}`
 - Left Touchdown Loading Rate / BW/s: `{trace.left_touchdown_loading_rate_bw_s.mean().item():.2f}`
 - Right Touchdown Loading Rate / BW/s: `{trace.right_touchdown_loading_rate_bw_s.mean().item():.2f}`
+- Left Touchdown Vertical Speed / m/s: `{trace.left_touchdown_vertical_speed_m_s.mean().item():.2f}`
+- Right Touchdown Vertical Speed / m/s: `{trace.right_touchdown_vertical_speed_m_s.mean().item():.2f}`
 - Touchdown Peak Asymmetry / BW: `{trace.touchdown_peak_asymmetry_bw.mean().item():.2f}`
 - Action Rate L2: `{trace.action_rate_l2.mean().item():.2f}`
 - Linear Velocity Error: `{trace.linear_velocity_error.mean().item():.2f}`
 - Yaw Rate Error: `{trace.yaw_rate_error.mean().item():.2f}`
+
+## Per-Capsule Touchdown Metrics
+
+| Capsule | Count | Peak / BW | Loading Rate / BW/s | Vertical Speed / m/s |
+| --- | ---: | ---: | ---: | ---: |
+{capsule_rows}
 """
   )

@@ -55,15 +55,27 @@ class EpisodeMetricTrace:
 
   foot_z_force_n: torch.Tensor
   foot_contact_flag: torch.Tensor
+  foot_vertical_velocity_m_s: torch.Tensor
+  capsule_names: tuple[str, ...]
+  capsule_z_force_n: torch.Tensor
+  capsule_contact_flag: torch.Tensor
+  capsule_vertical_velocity_m_s: torch.Tensor
   peak_force_bw: torch.Tensor
   loading_rate_bw_s: torch.Tensor
   touchdown_peak_force_bw: torch.Tensor
   touchdown_loading_rate_bw_s: torch.Tensor
+  touchdown_vertical_speed_m_s: torch.Tensor
   left_touchdown_peak_force_bw: torch.Tensor
   right_touchdown_peak_force_bw: torch.Tensor
   left_touchdown_loading_rate_bw_s: torch.Tensor
   right_touchdown_loading_rate_bw_s: torch.Tensor
+  left_touchdown_vertical_speed_m_s: torch.Tensor
+  right_touchdown_vertical_speed_m_s: torch.Tensor
   touchdown_peak_asymmetry_bw: torch.Tensor
+  capsule_touchdown_peak_force_bw: torch.Tensor
+  capsule_touchdown_loading_rate_bw_s: torch.Tensor
+  capsule_touchdown_vertical_speed_m_s: torch.Tensor
+  capsule_touchdown_count: torch.Tensor
   action_rate_l2: torch.Tensor
   command_velocity: torch.Tensor
   actual_linear_velocity: torch.Tensor

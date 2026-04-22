@@ -31,8 +31,11 @@ from mjlab.utils.torch import configure_torch_backends
 import src.tasks  # noqa: F401
 
 from .contact_backends import (
+  extract_capsule_contact_forces,
+  extract_capsule_vertical_velocities,
   extract_feet_contact_flags,
   extract_feet_net_forces,
+  extract_foot_vertical_velocities,
   supports_contact_backend,
 )
 from .metrics import (
@@ -55,6 +58,7 @@ class SilentEvalResult:
   robot_name: str
   task_id: str
   steps: int
+  step_dt: float
   trace: EpisodeMetricTrace
   summary: EpisodeMetricSummary
 
@@ -130,19 +134,27 @@ def _compute_touchdown_metrics(
   normal_force_series: torch.Tensor,
   contact_flag_series: torch.Tensor,
   dt: float,
+  vertical_velocity_series: torch.Tensor | None = None,
   loading_window_steps: int = 5,
-) -> tuple[list[torch.Tensor], list[torch.Tensor]]:
-  """Compute per-touchdown peak force and loading rate from per-foot force series."""
+) -> tuple[list[torch.Tensor], list[torch.Tensor], list[torch.Tensor]]:
+  """Compute per-touchdown peak force, loading rate, and vertical speed."""
 
   touchdown_peaks: list[torch.Tensor] = []
   touchdown_rates: list[torch.Tensor] = []
+  touchdown_vertical_speeds: list[torch.Tensor] = []
   num_steps, num_feet = normal_force_series.shape
 
   for foot_idx in range(num_feet):
     foot_touchdown_peaks: list[torch.Tensor] = []
     foot_touchdown_rates: list[torch.Tensor] = []
+    foot_touchdown_vertical_speeds: list[torch.Tensor] = []
     foot_forces = normal_force_series[:, foot_idx]
     foot_contacts = contact_flag_series[:, foot_idx]
+    foot_vertical_velocity = (
+      vertical_velocity_series[:, foot_idx]
+      if vertical_velocity_series is not None
+      else None
+    )
     previous_contact = False
 
     for step_idx in range(num_steps):
@@ -152,17 +164,32 @@ def _compute_touchdown_metrics(
         window = foot_forces[step_idx:end_idx]
         foot_touchdown_peaks.append(window.max())
         foot_touchdown_rates.append(compute_loading_rate(window, dt=dt))
+        if foot_vertical_velocity is not None:
+          foot_touchdown_vertical_speeds.append(
+            torch.clamp(-foot_vertical_velocity[step_idx], min=0.0)
+          )
       previous_contact = in_contact
 
     if foot_touchdown_peaks:
       touchdown_peaks.append(torch.stack(foot_touchdown_peaks))
       touchdown_rates.append(torch.stack(foot_touchdown_rates))
+      if foot_touchdown_vertical_speeds:
+        touchdown_vertical_speeds.append(torch.stack(foot_touchdown_vertical_speeds))
+      else:
+        touchdown_vertical_speeds.append(torch.zeros(1, device=normal_force_series.device))
     else:
       zero = torch.zeros(1, device=normal_force_series.device)
       touchdown_peaks.append(zero)
       touchdown_rates.append(zero)
+      touchdown_vertical_speeds.append(zero)
 
-  return touchdown_peaks, touchdown_rates
+  return touchdown_peaks, touchdown_rates, touchdown_vertical_speeds
+
+
+def _summarize_channel_events(channel_events: list[torch.Tensor]) -> torch.Tensor:
+  """Reduce variable-length event lists into one mean value per channel."""
+
+  return torch.stack([events.mean() for events in channel_events])
 
 
 def _load_checkpoint_policy(
@@ -228,6 +255,10 @@ def run_silent_eval(
 
     peak_force_samples: list[torch.Tensor] = []
     contact_flag_samples: list[torch.Tensor] = []
+    foot_vertical_velocity_samples: list[torch.Tensor] = []
+    capsule_force_samples: list[torch.Tensor] = []
+    capsule_contact_flag_samples: list[torch.Tensor] = []
+    capsule_vertical_velocity_samples: list[torch.Tensor] = []
     action_rate_samples: list[torch.Tensor] = []
     command_velocity_samples: list[torch.Tensor] = []
     actual_linear_velocity_samples: list[torch.Tensor] = []
@@ -249,8 +280,23 @@ def run_silent_eval(
       raw_obs, obs = _step_env(env, action)
       foot_force = extract_feet_net_forces(env, robot_name=robot_name)
       foot_contact = extract_feet_contact_flags(env, robot_name=robot_name)
+      foot_vertical_velocity = extract_foot_vertical_velocities(env, robot_name=robot_name)
+      capsule_names, capsule_force, capsule_contact = extract_capsule_contact_forces(
+        env,
+        robot_name=robot_name,
+      )
+      capsule_velocity_names, capsule_vertical_velocity = extract_capsule_vertical_velocities(
+        env,
+        robot_name=robot_name,
+      )
+      if capsule_names != capsule_velocity_names:
+        raise RuntimeError("Capsule force and velocity ordering mismatch")
       peak_force_samples.append(foot_force[..., 2].abs().squeeze(0))
       contact_flag_samples.append(foot_contact.squeeze(0))
+      foot_vertical_velocity_samples.append(foot_vertical_velocity.squeeze(0))
+      capsule_force_samples.append(capsule_force.squeeze(0))
+      capsule_contact_flag_samples.append(capsule_contact.squeeze(0))
+      capsule_vertical_velocity_samples.append(capsule_vertical_velocity.squeeze(0))
 
       twist_command = env.command_manager.get_command("twist")
       if twist_command is None:
@@ -275,23 +321,45 @@ def run_silent_eval(
 
     peak_force_series = torch.stack(peak_force_samples)
     contact_flag_series = torch.stack(contact_flag_samples)
+    foot_vertical_velocity_series = torch.stack(foot_vertical_velocity_samples)
+    capsule_force_series = torch.stack(capsule_force_samples)
+    capsule_contact_flag_series = torch.stack(capsule_contact_flag_samples)
+    capsule_vertical_velocity_series = torch.stack(capsule_vertical_velocity_samples)
     action_rate_series = torch.stack(action_rate_samples)
     command_velocity_series = torch.stack(command_velocity_samples)
     actual_linear_velocity_series = torch.stack(actual_linear_velocity_samples)
     actual_yaw_rate_series = torch.stack(actual_yaw_rate_samples)
     linear_velocity_error_series = torch.stack(linear_velocity_error_samples)
     yaw_rate_error_series = torch.stack(yaw_rate_error_samples)
-    touchdown_peak_force_by_foot, touchdown_loading_rate_by_foot = _compute_touchdown_metrics(
+    (
+      touchdown_peak_force_by_foot,
+      touchdown_loading_rate_by_foot,
+      touchdown_vertical_speed_by_foot,
+    ) = _compute_touchdown_metrics(
       peak_force_series,
       contact_flag_series,
       dt=env.step_dt,
+      vertical_velocity_series=foot_vertical_velocity_series,
+    )
+    (
+      touchdown_peak_force_by_capsule,
+      touchdown_loading_rate_by_capsule,
+      touchdown_vertical_speed_by_capsule,
+    ) = _compute_touchdown_metrics(
+      capsule_force_series,
+      capsule_contact_flag_series,
+      dt=env.step_dt,
+      vertical_velocity_series=capsule_vertical_velocity_series,
     )
     left_touchdown_peak_force = touchdown_peak_force_by_foot[0]
     right_touchdown_peak_force = touchdown_peak_force_by_foot[1]
     left_touchdown_loading_rate = touchdown_loading_rate_by_foot[0]
     right_touchdown_loading_rate = touchdown_loading_rate_by_foot[1]
+    left_touchdown_vertical_speed = touchdown_vertical_speed_by_foot[0]
+    right_touchdown_vertical_speed = touchdown_vertical_speed_by_foot[1]
     touchdown_peak_force = torch.cat(touchdown_peak_force_by_foot)
     touchdown_loading_rate = torch.cat(touchdown_loading_rate_by_foot)
+    touchdown_vertical_speed = torch.cat(touchdown_vertical_speed_by_foot)
     peak_force_bw = normalize_force_by_body_weight(
       touchdown_peak_force.mean(),
       body_weight_newton=spec.mass_normalization,
@@ -320,6 +388,21 @@ def run_silent_eval(
       right_touchdown_loading_rate,
       body_weight_newton=spec.mass_normalization,
     )
+    capsule_touchdown_peak_force_bw = normalize_force_by_body_weight(
+      _summarize_channel_events(touchdown_peak_force_by_capsule),
+      body_weight_newton=spec.mass_normalization,
+    )
+    capsule_touchdown_loading_rate_bw_s = normalize_force_by_body_weight(
+      _summarize_channel_events(touchdown_loading_rate_by_capsule),
+      body_weight_newton=spec.mass_normalization,
+    )
+    capsule_touchdown_vertical_speed_m_s = _summarize_channel_events(
+      touchdown_vertical_speed_by_capsule
+    )
+    capsule_touchdown_count = torch.tensor(
+      [events.numel() for events in touchdown_peak_force_by_capsule],
+      dtype=torch.float32,
+    )
     touchdown_peak_asymmetry_bw = torch.abs(
       left_touchdown_peak_force_bw.mean() - right_touchdown_peak_force_bw.mean()
     ).reshape(1)
@@ -341,15 +424,27 @@ def run_silent_eval(
     trace = EpisodeMetricTrace(
       foot_z_force_n=peak_force_series,
       foot_contact_flag=contact_flag_series.float(),
+      foot_vertical_velocity_m_s=foot_vertical_velocity_series,
+      capsule_names=capsule_names,
+      capsule_z_force_n=capsule_force_series,
+      capsule_contact_flag=capsule_contact_flag_series.float(),
+      capsule_vertical_velocity_m_s=capsule_vertical_velocity_series,
       peak_force_bw=peak_force_bw.reshape(1),
       loading_rate_bw_s=loading_rate_bw_s.reshape(1),
       touchdown_peak_force_bw=touchdown_peak_force_bw.flatten(),
       touchdown_loading_rate_bw_s=touchdown_loading_rate_bw_s.flatten(),
+      touchdown_vertical_speed_m_s=touchdown_vertical_speed.flatten(),
       left_touchdown_peak_force_bw=left_touchdown_peak_force_bw.flatten(),
       right_touchdown_peak_force_bw=right_touchdown_peak_force_bw.flatten(),
       left_touchdown_loading_rate_bw_s=left_touchdown_loading_rate_bw_s.flatten(),
       right_touchdown_loading_rate_bw_s=right_touchdown_loading_rate_bw_s.flatten(),
+      left_touchdown_vertical_speed_m_s=left_touchdown_vertical_speed.flatten(),
+      right_touchdown_vertical_speed_m_s=right_touchdown_vertical_speed.flatten(),
       touchdown_peak_asymmetry_bw=touchdown_peak_asymmetry_bw,
+      capsule_touchdown_peak_force_bw=capsule_touchdown_peak_force_bw.flatten(),
+      capsule_touchdown_loading_rate_bw_s=capsule_touchdown_loading_rate_bw_s.flatten(),
+      capsule_touchdown_vertical_speed_m_s=capsule_touchdown_vertical_speed_m_s.flatten(),
+      capsule_touchdown_count=capsule_touchdown_count.flatten(),
       action_rate_l2=action_rate_series.flatten(),
       command_velocity=command_velocity_series,
       actual_linear_velocity=actual_linear_velocity_series,
@@ -368,6 +463,7 @@ def run_silent_eval(
       robot_name=robot_name,
       task_id=spec.task_id,
       steps=steps,
+      step_dt=env.step_dt,
       trace=trace,
       summary=summary,
     )

@@ -35,10 +35,10 @@ def main() -> None:
       adapt_policy_path,
       is_checkpoint_path,
     )
-    from src.evaluation.silent_walking.plotting import save_trace_plot
-    from src.evaluation.silent_walking.reporting import render_markdown_report
     from src.evaluation.silent_walking.robots import get_robot_spec
     from src.evaluation.silent_walking.runner import run_silent_eval
+    from src.evaluation.silent_walking.plotting import save_trace_plot
+    from src.evaluation.silent_walking.reporting import render_markdown_report
   except ModuleNotFoundError as exc:
     raise SystemExit(
       "Missing runtime dependency for silent walking evaluation: "
@@ -78,7 +78,7 @@ def main() -> None:
       result.trace,
       args.plot_file,
       title=f"{result.robot_name}: {Path(args.policy).name}",
-      dt=0.02,
+      dt=result.step_dt,
     )
     print(f"\nPlot saved to: {args.plot_file}")
 

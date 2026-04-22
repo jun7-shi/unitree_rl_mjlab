@@ -138,14 +138,32 @@ def test_compute_touchdown_metrics_extracts_event_windows():
       [False, True],
     ]
   )
+  vertical_velocity = torch.tensor(
+    [
+      [0.0, 0.0],
+      [-0.4, 0.0],
+      [-0.2, -0.3],
+      [-0.1, -0.2],
+      [0.0, 0.0],
+      [0.0, -0.5],
+      [0.0, -0.1],
+    ]
+  )
 
-  peaks, rates = _compute_touchdown_metrics(
-    forces, contacts, dt=0.02, loading_window_steps=3
+  peaks, rates, speeds = _compute_touchdown_metrics(
+    forces,
+    contacts,
+    dt=0.02,
+    vertical_velocity_series=vertical_velocity,
+    loading_window_steps=3,
   )
 
   assert len(peaks) == 2
   assert len(rates) == 2
+  assert len(speeds) == 2
   assert torch.allclose(peaks[0], torch.tensor([20.0]))
   assert torch.allclose(peaks[1], torch.tensor([8.0, 18.0]))
   assert torch.allclose(rates[0], torch.tensor([500.0]))
   assert torch.allclose(rates[1], torch.tensor([400.0, 300.0]))
+  assert torch.allclose(speeds[0], torch.tensor([0.4]))
+  assert torch.allclose(speeds[1], torch.tensor([0.3, 0.5]))

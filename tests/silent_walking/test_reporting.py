@@ -46,15 +46,27 @@ def test_render_markdown_report_includes_raw_metrics_when_trace_is_present():
   trace = EpisodeMetricTrace(
     foot_z_force_n=torch.tensor([[10.0, 12.0], [0.0, 8.0]]),
     foot_contact_flag=torch.tensor([[1.0, 1.0], [0.0, 1.0]]),
+    foot_vertical_velocity_m_s=torch.tensor([[-0.2, -0.3], [0.0, -0.1]]),
+    capsule_names=("left_foot1_collision", "right_foot1_collision"),
+    capsule_z_force_n=torch.tensor([[5.0, 7.0], [0.0, 6.0]]),
+    capsule_contact_flag=torch.tensor([[1.0, 1.0], [0.0, 1.0]]),
+    capsule_vertical_velocity_m_s=torch.tensor([[-0.1, -0.2], [0.0, -0.1]]),
     peak_force_bw=torch.tensor([1.5]),
     loading_rate_bw_s=torch.tensor([2.5]),
     touchdown_peak_force_bw=torch.tensor([1.2, 1.8]),
     touchdown_loading_rate_bw_s=torch.tensor([2.0, 3.0]),
+    touchdown_vertical_speed_m_s=torch.tensor([0.2, 0.3]),
     left_touchdown_peak_force_bw=torch.tensor([1.2]),
     right_touchdown_peak_force_bw=torch.tensor([1.8]),
     left_touchdown_loading_rate_bw_s=torch.tensor([2.0]),
     right_touchdown_loading_rate_bw_s=torch.tensor([3.0]),
+    left_touchdown_vertical_speed_m_s=torch.tensor([0.2]),
+    right_touchdown_vertical_speed_m_s=torch.tensor([0.3]),
     touchdown_peak_asymmetry_bw=torch.tensor([0.6]),
+    capsule_touchdown_peak_force_bw=torch.tensor([1.1, 1.7]),
+    capsule_touchdown_loading_rate_bw_s=torch.tensor([1.9, 2.9]),
+    capsule_touchdown_vertical_speed_m_s=torch.tensor([0.1, 0.2]),
+    capsule_touchdown_count=torch.tensor([1.0, 2.0]),
     action_rate_l2=torch.tensor([0.5, 1.5]),
     command_velocity=torch.tensor([[0.3, 0.0, 0.1], [0.2, 0.0, 0.1]]),
     actual_linear_velocity=torch.tensor([[0.2, 0.0], [0.1, 0.0]]),
@@ -71,9 +83,12 @@ def test_render_markdown_report_includes_raw_metrics_when_trace_is_present():
   assert "Loading Rate / BW/s" in report
   assert "Touchdown Peak Force / BW" in report
   assert "Touchdown Loading Rate / BW/s" in report
+  assert "Touchdown Vertical Speed / m/s" in report
   assert "Left Touchdown Peak / BW" in report
   assert "Right Touchdown Peak / BW" in report
   assert "Touchdown Peak Asymmetry / BW" in report
+  assert "Per-Capsule Touchdown Metrics" in report
+  assert "left_foot1_collision" in report
   assert "Action Rate L2" in report
   assert "Linear Velocity Error" in report
   assert "Yaw Rate Error" in report
