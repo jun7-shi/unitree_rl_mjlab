@@ -48,6 +48,7 @@ def test_render_markdown_report_includes_raw_metrics_when_trace_is_present():
     foot_contact_flag=torch.tensor([[1.0, 1.0], [0.0, 1.0]]),
     foot_vertical_velocity_m_s=torch.tensor([[-0.2, -0.3], [0.0, -0.1]]),
     capsule_names=("left_foot1_collision", "right_foot1_collision"),
+    capsule_layout_xy_m=torch.tensor([[-0.01, 0.02], [0.01, -0.02]]),
     capsule_z_force_n=torch.tensor([[5.0, 7.0], [0.0, 6.0]]),
     capsule_contact_flag=torch.tensor([[1.0, 1.0], [0.0, 1.0]]),
     capsule_vertical_velocity_m_s=torch.tensor([[-0.1, -0.2], [0.0, -0.1]]),

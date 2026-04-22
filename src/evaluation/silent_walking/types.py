@@ -57,6 +57,7 @@ class EpisodeMetricTrace:
   foot_contact_flag: torch.Tensor
   foot_vertical_velocity_m_s: torch.Tensor
   capsule_names: tuple[str, ...]
+  capsule_layout_xy_m: torch.Tensor
   capsule_z_force_n: torch.Tensor
   capsule_contact_flag: torch.Tensor
   capsule_vertical_velocity_m_s: torch.Tensor

@@ -37,7 +37,10 @@ def main() -> None:
     )
     from src.evaluation.silent_walking.robots import get_robot_spec
     from src.evaluation.silent_walking.runner import run_silent_eval
-    from src.evaluation.silent_walking.plotting import save_trace_plot
+    from src.evaluation.silent_walking.plotting import (
+      save_capsule_distribution_plot,
+      save_trace_plot,
+    )
     from src.evaluation.silent_walking.reporting import render_markdown_report
   except ModuleNotFoundError as exc:
     raise SystemExit(
@@ -74,13 +77,19 @@ def main() -> None:
     )
   )
   if args.plot_file is not None:
-    save_trace_plot(
+    trace_path = save_trace_plot(
       result.trace,
       args.plot_file,
       title=f"{result.robot_name}: {Path(args.policy).name}",
       dt=result.step_dt,
     )
-    print(f"\nPlot saved to: {args.plot_file}")
+    footmap_path = save_capsule_distribution_plot(
+      result.trace,
+      Path(args.plot_file).with_name(f"{Path(args.plot_file).stem}_foot_distribution.png"),
+      title=f"{result.robot_name}: {Path(args.policy).name} footprint",
+    )
+    print(f"\nPlot saved to: {trace_path}")
+    print(f"Foot distribution saved to: {footmap_path}")
 
 
 if __name__ == "__main__":

@@ -32,6 +32,7 @@ import src.tasks  # noqa: F401
 
 from .contact_backends import (
   extract_capsule_contact_forces,
+  extract_capsule_layout_positions,
   extract_capsule_vertical_velocities,
   extract_feet_contact_flags,
   extract_feet_net_forces,
@@ -259,6 +260,7 @@ def run_silent_eval(
     capsule_force_samples: list[torch.Tensor] = []
     capsule_contact_flag_samples: list[torch.Tensor] = []
     capsule_vertical_velocity_samples: list[torch.Tensor] = []
+    capsule_layout_xy: torch.Tensor | None = None
     action_rate_samples: list[torch.Tensor] = []
     command_velocity_samples: list[torch.Tensor] = []
     actual_linear_velocity_samples: list[torch.Tensor] = []
@@ -289,8 +291,16 @@ def run_silent_eval(
         env,
         robot_name=robot_name,
       )
+      capsule_layout_names, capsule_layout = extract_capsule_layout_positions(
+        env,
+        robot_name=robot_name,
+      )
       if capsule_names != capsule_velocity_names:
         raise RuntimeError("Capsule force and velocity ordering mismatch")
+      if capsule_names != capsule_layout_names:
+        raise RuntimeError("Capsule force and layout ordering mismatch")
+      if capsule_layout_xy is None:
+        capsule_layout_xy = capsule_layout.squeeze(0).detach().clone()
       peak_force_samples.append(foot_force[..., 2].abs().squeeze(0))
       contact_flag_samples.append(foot_contact.squeeze(0))
       foot_vertical_velocity_samples.append(foot_vertical_velocity.squeeze(0))
@@ -426,6 +436,7 @@ def run_silent_eval(
       foot_contact_flag=contact_flag_series.float(),
       foot_vertical_velocity_m_s=foot_vertical_velocity_series,
       capsule_names=capsule_names,
+      capsule_layout_xy_m=capsule_layout_xy if capsule_layout_xy is not None else torch.zeros((0, 2)),
       capsule_z_force_n=capsule_force_series,
       capsule_contact_flag=capsule_contact_flag_series.float(),
       capsule_vertical_velocity_m_s=capsule_vertical_velocity_series,

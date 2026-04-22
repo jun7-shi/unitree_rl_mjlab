@@ -22,7 +22,7 @@ def save_trace_plot(
   output.parent.mkdir(parents=True, exist_ok=True)
 
   time_axis = torch.arange(trace.foot_z_force_n.shape[0], dtype=torch.float32) * dt
-  num_rows = 6 if trace.capsule_z_force_n.numel() > 0 else 5
+  num_rows = 5
 
   fig, axes = plt.subplots(num_rows, 1, figsize=(12, 2.4 * num_rows), sharex=True)
   fig.suptitle(title)
@@ -62,23 +62,78 @@ def save_trace_plot(
   axes[4].legend(loc="upper right", ncol=3)
   axes[4].grid(True, alpha=0.3)
 
-  if num_rows == 6:
-    image = axes[5].imshow(
-      trace.capsule_z_force_n.cpu().T,
-      aspect="auto",
-      origin="lower",
-      extent=[time_axis[0].item(), time_axis[-1].item(), -0.5, trace.capsule_z_force_n.shape[1] - 0.5],
-    )
-    axes[5].set_ylabel("Capsule")
-    axes[5].set_yticks(range(len(trace.capsule_names)))
-    axes[5].set_yticklabels(trace.capsule_names, fontsize=7)
-    axes[5].set_xlabel("Time (s)")
-    axes[5].grid(False)
-    fig.colorbar(image, ax=axes[5], label="Force (N)")
-  else:
-    axes[4].set_xlabel("Time (s)")
+  axes[4].set_xlabel("Time (s)")
 
   fig.tight_layout()
   fig.savefig(output, dpi=150)
   plt.close(fig)
   return output
+
+
+def save_capsule_distribution_plot(
+  trace: EpisodeMetricTrace,
+  output_path: str | Path,
+  title: str,
+) -> Path:
+  """Save a per-capsule footprint distribution plot."""
+
+  output = Path(output_path)
+  output.parent.mkdir(parents=True, exist_ok=True)
+
+  fig, axes = plt.subplots(1, 3, figsize=(15, 5), sharex=True, sharey=True)
+  fig.suptitle(title)
+
+  capsule_xy = trace.capsule_layout_xy_m.cpu().clone()
+  capsule_xy = _normalize_capsule_layout(capsule_xy, trace.capsule_names)
+  metrics = (
+    ("Peak / BW", trace.capsule_touchdown_peak_force_bw.cpu()),
+    ("Loading Rate / BW/s", trace.capsule_touchdown_loading_rate_bw_s.cpu()),
+    ("Vertical Speed / m/s", trace.capsule_touchdown_vertical_speed_m_s.cpu()),
+  )
+
+  for axis, (label, values) in zip(axes, metrics, strict=True):
+    scatter = axis.scatter(
+      capsule_xy[:, 0],
+      capsule_xy[:, 1],
+      c=values,
+      s=100 + 20 * trace.capsule_touchdown_count.cpu(),
+      cmap="viridis",
+      edgecolors="black",
+      linewidths=0.5,
+    )
+    for idx, (name, xy) in enumerate(zip(trace.capsule_names, capsule_xy, strict=True), start=1):
+      axis.text(xy[0], xy[1], str(idx if "left" in name else idx - 7), ha="center", va="center", fontsize=8, color="white")
+    axis.set_title(label)
+    axis.set_aspect("equal", adjustable="box")
+    axis.grid(True, alpha=0.2)
+    fig.colorbar(scatter, ax=axis, shrink=0.8)
+
+  axes[0].set_ylabel("Lateral Offset (m)")
+  for axis in axes:
+    axis.set_xlabel("Fore-Aft Offset (m)")
+
+  fig.tight_layout()
+  fig.savefig(output, dpi=150)
+  plt.close(fig)
+  return output
+
+
+def _normalize_capsule_layout(
+  capsule_xy: torch.Tensor,
+  capsule_names: tuple[str, ...],
+) -> torch.Tensor:
+  """Center left/right foot capsule positions and offset them for plotting."""
+
+  if capsule_xy.numel() == 0:
+    return capsule_xy
+
+  normalized = capsule_xy.clone()
+  for side, offset in (("left", -0.12), ("right", 0.12)):
+    indices = [idx for idx, name in enumerate(capsule_names) if side in name]
+    if not indices:
+      continue
+    side_xy = normalized[indices]
+    side_xy = side_xy - side_xy.mean(dim=0, keepdim=True)
+    side_xy[:, 0] += offset
+    normalized[indices] = side_xy
+  return normalized

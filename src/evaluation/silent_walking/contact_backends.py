@@ -85,6 +85,21 @@ def extract_capsule_vertical_velocities(env, robot_name: str) -> tuple[tuple[str
   return tuple(geom_names), robot.data.geom_lin_vel_w[:, geom_ids, 2]
 
 
+def extract_capsule_layout_positions(env, robot_name: str) -> tuple[tuple[str, ...], torch.Tensor]:
+  """Extract per-capsule horizontal positions for footprint plotting."""
+
+  if not supports_contact_backend(robot_name):
+    spec = get_robot_spec(robot_name)
+    raise NotImplementedError(
+      f"Capsule layout extraction is not implemented yet for robot '{spec.name}'"
+    )
+
+  spec = get_robot_spec(robot_name)
+  robot = env.scene["robot"]
+  geom_ids, geom_names = robot.find_geoms(spec.foot_collision_geom_names, preserve_order=True)
+  return tuple(geom_names), robot.data.geom_pos_w[:, geom_ids, :2]
+
+
 def _resolve_sim_geom_ids(env, geom_names: tuple[str, ...]) -> list[int]:
   """Resolve local evaluator geom names to MuJoCo geom ids."""
 
@@ -110,7 +125,7 @@ def extract_capsule_contact_forces(
   env,
   robot_name: str,
 ) -> tuple[tuple[str, ...], torch.Tensor, torch.Tensor]:
-  """Extract per-capsule summed normal contact forces and contact flags."""
+  """Extract per-capsule summed world-z contact forces and contact flags."""
 
   if not supports_contact_backend(robot_name):
     spec = get_robot_spec(robot_name)
@@ -138,8 +153,10 @@ def extract_capsule_contact_forces(
       continue
 
     mujoco.mj_contactForce(env.sim.mj_model, env.sim.mj_data, contact_idx, contact_wrench)
+    contact_frame = np.array(contact.frame, dtype=np.float64).reshape(3, 3)
+    world_force = contact_frame.T @ contact_wrench[:3]
     geom_index = sim_geom_to_index[geom_id]
-    normal_forces[0, geom_index] += float(max(contact_wrench[0], 0.0))
+    normal_forces[0, geom_index] += float(max(world_force[2], 0.0))
     contact_flags[0, geom_index] = True
 
   return geom_names, normal_forces, contact_flags
