@@ -465,6 +465,14 @@ def run_silent_eval(
       foot_vertical_velocity_m_s=foot_vertical_velocity_series,
       capsule_names=capsule_names,
       capsule_layout_xy_m=capsule_layout_xy if capsule_layout_xy is not None else torch.zeros((0, 2)),
+      capsule_outline_fromto_xy_m=torch.tensor(
+        spec.foot_collision_fromto_xy_m,
+        dtype=torch.float32,
+      ) if spec.foot_collision_fromto_xy_m else torch.zeros((0, 2, 2), dtype=torch.float32),
+      capsule_radius_m=torch.tensor(
+        spec.foot_collision_radius_m,
+        dtype=torch.float32,
+      ) if spec.foot_collision_radius_m else torch.zeros((0,), dtype=torch.float32),
       capsule_z_force_n=capsule_force_series,
       capsule_contact_flag=capsule_contact_flag_series.float(),
       capsule_vertical_velocity_m_s=capsule_vertical_velocity_series,

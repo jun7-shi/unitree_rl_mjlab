@@ -18,6 +18,8 @@ class RobotSpec:
   action_dim: int
   foot_site_names: tuple[str, ...]
   foot_collision_geom_names: tuple[str, ...]
+  foot_collision_fromto_xy_m: tuple[tuple[tuple[float, float], tuple[float, float]], ...]
+  foot_collision_radius_m: tuple[float, ...]
   asset_path: Path
   mass_normalization: float
 
@@ -58,6 +60,8 @@ class EpisodeMetricTrace:
   foot_vertical_velocity_m_s: torch.Tensor
   capsule_names: tuple[str, ...]
   capsule_layout_xy_m: torch.Tensor
+  capsule_outline_fromto_xy_m: torch.Tensor
+  capsule_radius_m: torch.Tensor
   capsule_z_force_n: torch.Tensor
   capsule_contact_flag: torch.Tensor
   capsule_vertical_velocity_m_s: torch.Tensor

@@ -14,6 +14,10 @@ def test_g1_robot_spec_has_expected_metadata():
   assert spec.action_dim == 29
   assert spec.foot_site_names == ("left_foot", "right_foot")
   assert "left_foot1_collision" in spec.foot_collision_geom_names
+  assert len(spec.foot_collision_fromto_xy_m) == len(spec.foot_collision_geom_names) == 14
+  assert len(spec.foot_collision_radius_m) == 14
+  assert spec.foot_collision_radius_m[0] == 0.01
+  assert spec.foot_collision_fromto_xy_m[0] == ((0.1, -0.026), (0.05, -0.027))
 
 
 def test_bumi_robot_spec_exists_before_assets():

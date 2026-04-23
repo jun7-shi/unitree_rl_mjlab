@@ -1,6 +1,7 @@
 """Robot registry for silent walking evaluation."""
 
 import xml.etree.ElementTree as ET
+from typing import Iterable
 
 from src import SRC_PATH
 
@@ -33,13 +34,79 @@ def _foot_collision_geom_names() -> tuple[str, ...]:
   )
 
 
+def _resolve_default_geom_size(root: ET.Element, class_name: str) -> float | None:
+  for default in root.iter("default"):
+    if default.attrib.get("class") != class_name:
+      continue
+    geom = default.find("geom")
+    if geom is None:
+      continue
+    size_text = geom.attrib.get("size")
+    if not size_text:
+      continue
+    return float(size_text.split()[0])
+  return None
+
+
+def _parse_fromto_xy(value: str) -> tuple[tuple[float, float], tuple[float, float]]:
+  coords = [float(entry) for entry in value.split()]
+  if len(coords) != 6:
+    raise ValueError(f"Expected 6 fromto coordinates, got {len(coords)}")
+  return ((coords[0], coords[1]), (coords[3], coords[4]))
+
+
+def _foot_collision_geometry_from_xml(
+  xml_path,
+  geom_names: Iterable[str],
+) -> tuple[
+  tuple[tuple[tuple[float, float], tuple[float, float]], ...],
+  tuple[float, ...],
+]:
+  if not xml_path.exists():
+    return (), ()
+
+  root = ET.parse(xml_path).getroot()
+  default_radius = _resolve_default_geom_size(root, "foot_capsule")
+  geometry: dict[str, tuple[tuple[tuple[float, float], tuple[float, float]], float]] = {}
+  for geom in root.iter("geom"):
+    name = geom.attrib.get("name")
+    if not name or name not in geom_names:
+      continue
+    fromto_text = geom.attrib.get("fromto")
+    if fromto_text is None:
+      continue
+    size_text = geom.attrib.get("size")
+    radius = float(size_text.split()[0]) if size_text else default_radius
+    if radius is None:
+      raise ValueError(f"Missing size for foot collision geom '{name}'")
+    geometry[name] = (_parse_fromto_xy(fromto_text), radius)
+
+  ordered_names = tuple(geom_names)
+  if any(name not in geometry for name in ordered_names):
+    missing = [name for name in ordered_names if name not in geometry]
+    raise ValueError(f"Missing foot collision geometry in XML: {missing}")
+
+  fromto_xy = tuple(geometry[name][0] for name in ordered_names)
+  radii = tuple(geometry[name][1] for name in ordered_names)
+  return fromto_xy, radii
+
+
+_FOOT_COLLISION_GEOM_NAMES = _foot_collision_geom_names()
+_G1_FOOT_COLLISION_FROMTO_XY_M, _G1_FOOT_COLLISION_RADIUS_M = _foot_collision_geometry_from_xml(
+  _G1_XML,
+  _FOOT_COLLISION_GEOM_NAMES,
+)
+
+
 ROBOT_REGISTRY: dict[str, RobotSpec] = {
   "g1": RobotSpec(
     name="g1",
     task_id="Unitree-G1-Flat",
     action_dim=29,
     foot_site_names=("left_foot", "right_foot"),
-    foot_collision_geom_names=_foot_collision_geom_names(),
+    foot_collision_geom_names=_FOOT_COLLISION_GEOM_NAMES,
+    foot_collision_fromto_xy_m=_G1_FOOT_COLLISION_FROMTO_XY_M,
+    foot_collision_radius_m=_G1_FOOT_COLLISION_RADIUS_M,
     asset_path=_G1_XML,
     mass_normalization=_mass_normalization_from_xml(_G1_XML),
   ),
@@ -49,6 +116,8 @@ ROBOT_REGISTRY: dict[str, RobotSpec] = {
     action_dim=12,
     foot_site_names=("left_foot", "right_foot"),
     foot_collision_geom_names=(),
+    foot_collision_fromto_xy_m=(),
+    foot_collision_radius_m=(),
     asset_path=_BUMI_XML,
     mass_normalization=1.0,
   ),

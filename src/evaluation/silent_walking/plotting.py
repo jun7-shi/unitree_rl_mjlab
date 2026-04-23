@@ -4,6 +4,9 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from matplotlib import cm
+from matplotlib import colors
+from matplotlib.patches import Polygon
 import matplotlib.pyplot as plt
 import torch
 
@@ -83,26 +86,35 @@ def save_capsule_distribution_plot(
   fig, axis = plt.subplots(1, 1, figsize=(7, 6))
   fig.suptitle(title)
 
-  capsule_xy = trace.capsule_layout_xy_m.cpu().clone()
-  capsule_xy = _normalize_capsule_layout(capsule_xy, trace.capsule_names)
+  capsule_outline = trace.capsule_outline_fromto_xy_m.cpu().clone()
+  capsule_outline = _normalize_capsule_outline(capsule_outline, trace.capsule_names)
+  capsule_xy = capsule_outline.mean(dim=1)
   values = trace.capsule_touchdown_peak_force_bw.cpu()
-  scatter = axis.scatter(
-    capsule_xy[:, 0],
-    capsule_xy[:, 1],
-    c=values,
-    s=130 + 25 * trace.capsule_touchdown_count.cpu(),
-    cmap="viridis",
-    edgecolors="black",
-    linewidths=0.8,
+  radii = trace.capsule_radius_m.cpu()
+  norm = colors.Normalize(
+    vmin=float(values.min().item()) if values.numel() else 0.0,
+    vmax=float(values.max().item()) if values.numel() else 1.0,
   )
-  for idx, (name, xy, value) in enumerate(
-    zip(trace.capsule_names, capsule_xy, values, strict=True),
+  cmap = cm.get_cmap("viridis")
+
+  for idx, (name, fromto_xy, radius, value) in enumerate(
+    zip(trace.capsule_names, capsule_outline, radii, values, strict=True),
     start=1,
   ):
+    polygon_xy = _capsule_outline_polygon(fromto_xy[0], fromto_xy[1], float(radius.item()))
+    patch = Polygon(
+      polygon_xy.tolist(),
+      closed=True,
+      facecolor=cmap(norm(float(value.item()))),
+      edgecolor="black",
+      linewidth=0.9,
+    )
+    axis.add_patch(patch)
     capsule_idx = idx if "left" in name else idx - 7
+    center_xy = fromto_xy.mean(dim=0)
     axis.text(
-      xy[0],
-      xy[1],
+      float(center_xy[0].item()),
+      float(center_xy[1].item()),
       f"{capsule_idx}\n{value:.2f}",
       ha="center",
       va="center",
@@ -116,7 +128,19 @@ def save_capsule_distribution_plot(
   axis.set_ylabel("Lateral Offset (m)")
   axis.set_aspect("equal", adjustable="box")
   axis.grid(True, alpha=0.2)
-  fig.colorbar(scatter, ax=axis, shrink=0.85, label="Peak / BW")
+  padding = 0.025
+  if capsule_outline.numel():
+    axis.set_xlim(
+      float(capsule_outline[..., 0].min().item()) - padding,
+      float(capsule_outline[..., 0].max().item()) + padding,
+    )
+    axis.set_ylim(
+      float(capsule_outline[..., 1].min().item()) - padding,
+      float(capsule_outline[..., 1].max().item()) + padding,
+    )
+  scalar_mappable = cm.ScalarMappable(norm=norm, cmap=cmap)
+  scalar_mappable.set_array(values.numpy() if values.numel() else [])
+  fig.colorbar(scalar_mappable, ax=axis, shrink=0.85, label="Peak / BW")
 
   fig.tight_layout()
   fig.savefig(output, dpi=150)
@@ -179,3 +203,53 @@ def _normalize_capsule_layout(
     side_xy[:, 0] += offset
     normalized[indices] = side_xy
   return normalized
+
+
+def _normalize_capsule_outline(
+  capsule_outline_xy: torch.Tensor,
+  capsule_names: tuple[str, ...],
+) -> torch.Tensor:
+  if capsule_outline_xy.numel() == 0:
+    return capsule_outline_xy
+
+  normalized = capsule_outline_xy.clone()
+  centers = normalized.mean(dim=1)
+  centered = _normalize_capsule_layout(centers, capsule_names)
+  deltas = centered - centers
+  normalized = normalized + deltas[:, None, :]
+  return normalized
+
+
+def _capsule_outline_polygon(
+  start_xy: torch.Tensor,
+  end_xy: torch.Tensor,
+  radius: float,
+  arc_points: int = 16,
+) -> torch.Tensor:
+  axis = end_xy - start_xy
+  length = torch.linalg.norm(axis)
+  if length <= 1e-8:
+    angles = torch.linspace(0.0, 2.0 * torch.pi, arc_points * 2)
+    unit_circle = torch.stack((torch.cos(angles), torch.sin(angles)), dim=1)
+    return start_xy + radius * unit_circle
+
+  tangent = axis / length
+  normal = torch.tensor((-tangent[1].item(), tangent[0].item()), dtype=torch.float32)
+  theta = torch.atan2(tangent[1], tangent[0])
+  start_arc = torch.stack(
+    (
+      start_xy[0] + radius * torch.cos(torch.linspace(theta + torch.pi / 2, theta + 3 * torch.pi / 2, arc_points)),
+      start_xy[1] + radius * torch.sin(torch.linspace(theta + torch.pi / 2, theta + 3 * torch.pi / 2, arc_points)),
+    ),
+    dim=1,
+  )
+  end_arc = torch.stack(
+    (
+      end_xy[0] + radius * torch.cos(torch.linspace(theta - torch.pi / 2, theta + torch.pi / 2, arc_points)),
+      end_xy[1] + radius * torch.sin(torch.linspace(theta - torch.pi / 2, theta + torch.pi / 2, arc_points)),
+    ),
+    dim=1,
+  )
+  side_a = torch.stack((start_xy + radius * normal, end_xy + radius * normal))
+  side_b = torch.stack((end_xy - radius * normal, start_xy - radius * normal))
+  return torch.cat((side_a[:1], end_arc, side_b[:1], start_arc), dim=0)
