@@ -23,6 +23,36 @@ def _get_body_indexes(
   ]
 
 
+def infer_reference_contacts_from_heights(
+  reference_heights: torch.Tensor,
+  clearance_threshold: float,
+) -> torch.Tensor:
+  """Infer stance feet from per-foot reference heights.
+
+  Each foot uses its own minimum height as the local floor proxy so clips with
+  slight left/right height offsets do not bias contact inference.
+  """
+  min_height = torch.amin(reference_heights, dim=0, keepdim=True)
+  return reference_heights <= (min_height + clearance_threshold)
+
+
+def swing_contact_cost_from_masks(
+  reference_contact: torch.Tensor,
+  actual_contact: torch.Tensor,
+) -> torch.Tensor:
+  """Return per-env count of feet touching while reference says swing."""
+  reference_swing = torch.logical_not(reference_contact)
+  return torch.sum((reference_swing & actual_contact).float(), dim=1)
+
+
+def landing_force_cost_from_contact_events(
+  first_contact: torch.Tensor,
+  force_magnitude: torch.Tensor,
+) -> torch.Tensor:
+  """Return per-env landing force summed over first-contact feet."""
+  return torch.sum(force_magnitude * first_contact.float(), dim=1)
+
+
 def motion_global_anchor_position_error_exp(
   env: ManagerBasedRlEnv, command_name: str, std: float
 ) -> torch.Tensor:
@@ -111,6 +141,54 @@ def motion_global_body_angular_velocity_error_exp(
     dim=-1,
   )
   return torch.exp(-error.mean(-1) / std**2)
+
+
+def motion_swing_contact_penalty(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  sensor_name: str,
+  foot_body_names: tuple[str, ...],
+  clearance_threshold: float = 0.03,
+) -> torch.Tensor:
+  """Penalize touching terrain when the reference foot is in swing phase."""
+  command = cast(MotionCommand, env.command_manager.get_term(command_name))
+  body_indexes = _get_body_indexes(command, foot_body_names)
+  if len(body_indexes) != len(foot_body_names):
+    raise ValueError(
+      "Could not resolve all foot body names for contact-aware tracking reward: "
+      f"{foot_body_names}"
+    )
+
+  reference_heights = command.body_pos_w[:, body_indexes, 2]
+  reference_floor_heights = torch.amin(
+    command.motion.body_pos_w[:, body_indexes, 2], dim=0, keepdim=True
+  )
+  reference_contact = reference_heights <= (
+    reference_floor_heights + clearance_threshold
+  )
+
+  sensor: ContactSensor = env.scene[sensor_name]
+  assert sensor.data.found is not None
+  actual_contact = sensor.data.found > 0
+  cost = swing_contact_cost_from_masks(reference_contact, actual_contact)
+  env.extras["log"]["Metrics/tracking_swing_contact_mean"] = torch.mean(cost)
+  return cost
+
+
+def motion_soft_landing_penalty(
+  env: ManagerBasedRlEnv,
+  sensor_name: str,
+) -> torch.Tensor:
+  """Penalize high terrain contact force at touchdown."""
+  sensor: ContactSensor = env.scene[sensor_name]
+  assert sensor.data.force is not None
+  force_magnitude = torch.norm(sensor.data.force, dim=-1)
+  first_contact = sensor.compute_first_contact(dt=env.step_dt)
+  cost = landing_force_cost_from_contact_events(first_contact, force_magnitude)
+  num_landings = torch.sum(first_contact.float())
+  mean_landing_force = torch.sum(cost) / torch.clamp(num_landings, min=1)
+  env.extras["log"]["Metrics/tracking_landing_force_mean"] = mean_landing_force
+  return cost
 
 
 def self_collision_cost(

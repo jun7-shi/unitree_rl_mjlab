@@ -7,9 +7,11 @@ from mjlab.asset_zoo.robots import (
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
 from mjlab.managers.observation_manager import ObservationGroupCfg
+from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
 
+import src.tasks.tracking.mdp as mdp
 from src.tasks.tracking.tracking_env_cfg import make_tracking_env_cfg
 
 
@@ -31,7 +33,20 @@ def unitree_g1_flat_tracking_env_cfg(
     num_slots=1,
     history_length=4,
   )
-  cfg.scene.sensors = (self_collision_cfg,)
+  feet_ground_contact_cfg = ContactSensorCfg(
+    name="feet_ground_contact",
+    primary=ContactMatch(
+      mode="subtree",
+      pattern=r"^(left_ankle_roll_link|right_ankle_roll_link)$",
+      entity="robot",
+    ),
+    secondary=ContactMatch(mode="body", pattern="terrain"),
+    fields=("found", "force"),
+    reduce="netforce",
+    num_slots=1,
+    track_air_time=True,
+  )
+  cfg.scene.sensors = (self_collision_cfg, feet_ground_contact_cfg)
 
   joint_pos_action = cfg.actions["joint_pos"]
   assert isinstance(joint_pos_action, JointPositionActionCfg)
@@ -61,6 +76,22 @@ def unitree_g1_flat_tracking_env_cfg(
     "asset_cfg"
   ].geom_names = r"^(left|right)_foot[1-7]_collision$"
   cfg.events["base_com"].params["asset_cfg"].body_names = ("torso_link",)
+
+  cfg.rewards["motion_swing_contact"] = RewardTermCfg(
+    func=mdp.motion_swing_contact_penalty,
+    weight=-0.5,
+    params={
+      "command_name": "motion",
+      "sensor_name": feet_ground_contact_cfg.name,
+      "foot_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
+      "clearance_threshold": 0.03,
+    },
+  )
+  cfg.rewards["motion_soft_landing"] = RewardTermCfg(
+    func=mdp.motion_soft_landing_penalty,
+    weight=-1e-3,
+    params={"sensor_name": feet_ground_contact_cfg.name},
+  )
 
   cfg.terminations["ee_body_pos"].params["body_names"] = (
     "left_ankle_roll_link",
