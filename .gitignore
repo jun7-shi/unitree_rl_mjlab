@@ -1,11 +1,13 @@
 *.egg-info
 *.npz
 __pycache__/
+.cache/
 .idea
 outputs
 logs
 wandb
 /analysis/
+tea_debug.log
 MUJOCO_LOG.TXT
 deploy/robots/go2/build
 deploy/robots/g1/build
