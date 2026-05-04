@@ -24,6 +24,8 @@ class PlayConfig:
   agent: Literal["zero", "random", "trained"] = "trained"
   checkpoint_file: str | None = None
   motion_file: str | None = None
+  registry_name: str | None = None
+  wandb_run_path: str | None = None
   num_envs: int | None = None
   device: str | None = None
   video: bool = False
@@ -71,9 +73,12 @@ def run_play(task_id: str, cfg: PlayConfig):
     assert isinstance(motion_cmd, MotionCommandCfg)
 
     # Check for local motion file first (works for both dummy and trained modes).
-    if cfg.motion_file is not None and Path(cfg.motion_file).exists():
+    motion_path = None if cfg.motion_file is None else Path(cfg.motion_file)
+    if motion_path is not None and motion_path.exists():
       print(f"[INFO]: Using local motion file: {cfg.motion_file}")
       motion_cmd.motion_file = cfg.motion_file
+    elif motion_path is not None:
+      raise FileNotFoundError(f"Motion file not found: {cfg.motion_file}")
     elif DUMMY_MODE:
       if not cfg.registry_name:
         raise ValueError(
