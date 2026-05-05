@@ -92,6 +92,26 @@ def unitree_g1_flat_tracking_env_cfg(
     weight=-1e-3,
     params={"sensor_name": feet_ground_contact_cfg.name},
   )
+  cfg.rewards["motion_single_support"] = RewardTermCfg(
+    func=mdp.motion_single_support_reward,
+    weight=0.25,
+    params={
+      "command_name": "motion",
+      "sensor_name": feet_ground_contact_cfg.name,
+      "foot_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
+      "clearance_threshold": 0.03,
+    },
+  )
+  cfg.rewards["motion_swing_clearance"] = RewardTermCfg(
+    func=mdp.motion_swing_clearance_penalty,
+    weight=-2.0,
+    params={
+      "command_name": "motion",
+      "foot_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
+      "clearance_threshold": 0.03,
+      "margin_m": 0.10,
+    },
+  )
 
   cfg.terminations["ee_body_pos"].params["body_names"] = (
     "left_ankle_roll_link",

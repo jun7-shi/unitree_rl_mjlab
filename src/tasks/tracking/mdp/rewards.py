@@ -53,6 +53,29 @@ def landing_force_cost_from_contact_events(
   return torch.sum(force_magnitude * first_contact.float(), dim=1)
 
 
+def single_support_reward_from_masks(
+  reference_contact: torch.Tensor,
+  actual_contact: torch.Tensor,
+) -> torch.Tensor:
+  """Reward matching the reference support foot during single-support samples."""
+  reference_single_support = torch.sum(reference_contact.float(), dim=1) == 1.0
+  actual_matches_reference = torch.all(reference_contact == actual_contact, dim=1)
+  return (reference_single_support & actual_matches_reference).float()
+
+
+def swing_clearance_margin_cost_from_heights(
+  reference_contact: torch.Tensor,
+  actual_heights: torch.Tensor,
+  reference_floor_heights: torch.Tensor,
+  margin_m: float,
+) -> torch.Tensor:
+  """Penalize swing feet whose body-height clearance is below a margin."""
+  reference_swing = torch.logical_not(reference_contact)
+  actual_clearance = actual_heights - reference_floor_heights
+  clearance_deficit = torch.clamp(margin_m - actual_clearance, min=0.0)
+  return torch.sum(clearance_deficit * reference_swing.float(), dim=1)
+
+
 def motion_global_anchor_position_error_exp(
   env: ManagerBasedRlEnv, command_name: str, std: float
 ) -> torch.Tensor:
@@ -172,6 +195,72 @@ def motion_swing_contact_penalty(
   actual_contact = sensor.data.found > 0
   cost = swing_contact_cost_from_masks(reference_contact, actual_contact)
   env.extras["log"]["Metrics/tracking_swing_contact_mean"] = torch.mean(cost)
+  return cost
+
+
+def motion_single_support_reward(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  sensor_name: str,
+  foot_body_names: tuple[str, ...],
+  clearance_threshold: float = 0.03,
+) -> torch.Tensor:
+  """Reward matching the reference contact foot during single support."""
+  command = cast(MotionCommand, env.command_manager.get_term(command_name))
+  body_indexes = _get_body_indexes(command, foot_body_names)
+  if len(body_indexes) != len(foot_body_names):
+    raise ValueError(
+      "Could not resolve all foot body names for single-support reward: "
+      f"{foot_body_names}"
+    )
+
+  reference_heights = command.body_pos_w[:, body_indexes, 2]
+  reference_floor_heights = torch.amin(
+    command.motion.body_pos_w[:, body_indexes, 2], dim=0, keepdim=True
+  )
+  reference_contact = reference_heights <= (
+    reference_floor_heights + clearance_threshold
+  )
+
+  sensor: ContactSensor = env.scene[sensor_name]
+  assert sensor.data.found is not None
+  actual_contact = sensor.data.found > 0
+  reward = single_support_reward_from_masks(reference_contact, actual_contact)
+  env.extras["log"]["Metrics/tracking_single_support_match_mean"] = torch.mean(reward)
+  return reward
+
+
+def motion_swing_clearance_penalty(
+  env: ManagerBasedRlEnv,
+  command_name: str,
+  foot_body_names: tuple[str, ...],
+  clearance_threshold: float = 0.03,
+  margin_m: float = 0.10,
+) -> torch.Tensor:
+  """Penalize low swing-foot body height before contact occurs."""
+  command = cast(MotionCommand, env.command_manager.get_term(command_name))
+  body_indexes = _get_body_indexes(command, foot_body_names)
+  if len(body_indexes) != len(foot_body_names):
+    raise ValueError(
+      "Could not resolve all foot body names for swing-clearance reward: "
+      f"{foot_body_names}"
+    )
+
+  reference_floor_heights = torch.amin(
+    command.motion.body_pos_w[:, body_indexes, 2], dim=0, keepdim=True
+  )
+  reference_heights = command.body_pos_w[:, body_indexes, 2]
+  reference_contact = reference_heights <= (
+    reference_floor_heights + clearance_threshold
+  )
+  actual_heights = command.robot_body_pos_w[:, body_indexes, 2]
+  cost = swing_clearance_margin_cost_from_heights(
+    reference_contact=reference_contact,
+    actual_heights=actual_heights,
+    reference_floor_heights=reference_floor_heights,
+    margin_m=margin_m,
+  )
+  env.extras["log"]["Metrics/tracking_swing_clearance_cost_mean"] = torch.mean(cost)
   return cost
 
 
