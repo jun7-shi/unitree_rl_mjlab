@@ -56,8 +56,13 @@ class ClearanceSummary:
 
   min_swing_clearance_m: float
   mean_swing_clearance_m: float
+  p05_swing_clearance_m: float
+  p10_swing_clearance_m: float
+  low_swing_clearance_ratio_2cm: float
   left_min_swing_clearance_m: float
   right_min_swing_clearance_m: float
+  left_low_swing_clearance_ratio_2cm: float
+  right_low_swing_clearance_ratio_2cm: float
 
   def to_dict(self) -> dict[str, float]:
     return asdict(self)
@@ -201,14 +206,23 @@ def clearance_summary(clearance_m: np.ndarray, reference_contact: np.ndarray) ->
   swing = ~reference
 
   foot_min: list[float] = []
+  foot_low_ratio: list[float] = []
   for foot in range(2):
     values = clearance[swing[:, foot], foot]
     foot_min.append(float(np.min(values)) if values.size else 0.0)
+    foot_low_ratio.append(float(np.mean(values < 0.02)) if values.size else 0.0)
 
   all_values = clearance[swing]
   return ClearanceSummary(
     min_swing_clearance_m=float(np.min(all_values)) if all_values.size else 0.0,
     mean_swing_clearance_m=float(np.mean(all_values)) if all_values.size else 0.0,
+    p05_swing_clearance_m=float(np.percentile(all_values, 5)) if all_values.size else 0.0,
+    p10_swing_clearance_m=float(np.percentile(all_values, 10)) if all_values.size else 0.0,
+    low_swing_clearance_ratio_2cm=(
+      float(np.mean(all_values < 0.02)) if all_values.size else 0.0
+    ),
     left_min_swing_clearance_m=foot_min[0],
     right_min_swing_clearance_m=foot_min[1],
+    left_low_swing_clearance_ratio_2cm=foot_low_ratio[0],
+    right_low_swing_clearance_ratio_2cm=foot_low_ratio[1],
   )

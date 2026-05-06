@@ -29,6 +29,7 @@ def run_checkpoint_gait_trace(
   device: str,
   robot_name: str = "g1",
   disable_randomization: bool = True,
+  disable_foot_phase_observation: bool = False,
 ) -> PolicyGaitTrace:
   """Run a checkpoint policy and collect foot contact and clearance signals."""
 
@@ -64,6 +65,9 @@ def run_checkpoint_gait_trace(
   motion_cmd.sampling_mode = "start"
   motion_cmd.pose_range = {}
   motion_cmd.velocity_range = {}
+  if disable_foot_phase_observation:
+    for group in env_cfg.observations.values():
+      group.terms.pop("motion_foot_phase", None)
   if disable_randomization:
     env_cfg.events = {}
   _ensure_capsule_contact_sensor(env_cfg, robot_name)

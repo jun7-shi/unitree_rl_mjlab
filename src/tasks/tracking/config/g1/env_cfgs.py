@@ -6,7 +6,7 @@ from mjlab.asset_zoo.robots import (
 )
 from mjlab.envs import ManagerBasedRlEnvCfg
 from mjlab.envs.mdp.actions import JointPositionActionCfg
-from mjlab.managers.observation_manager import ObservationGroupCfg
+from mjlab.managers.observation_manager import ObservationGroupCfg, ObservationTermCfg
 from mjlab.managers.reward_manager import RewardTermCfg
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.tasks.tracking.mdp import MotionCommandCfg
@@ -71,6 +71,16 @@ def unitree_g1_flat_tracking_env_cfg(
     "right_elbow_link",
     "right_wrist_yaw_link",
   )
+  foot_phase_obs = ObservationTermCfg(
+    func=mdp.motion_foot_phase,
+    params={
+      "command_name": "motion",
+      "foot_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
+      "clearance_threshold": 0.03,
+    },
+  )
+  cfg.observations["actor"].terms["motion_foot_phase"] = foot_phase_obs
+  cfg.observations["critic"].terms["motion_foot_phase"] = foot_phase_obs
 
   cfg.events["foot_friction"].params[
     "asset_cfg"
@@ -102,14 +112,51 @@ def unitree_g1_flat_tracking_env_cfg(
       "clearance_threshold": 0.03,
     },
   )
-  cfg.rewards["motion_swing_clearance"] = RewardTermCfg(
-    func=mdp.motion_swing_clearance_penalty,
+  cfg.rewards["motion_phase_swing_clearance"] = RewardTermCfg(
+    func=mdp.motion_phase_swing_clearance_penalty,
+    weight=-1.0,
+    params={
+      "command_name": "motion",
+      "foot_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
+      "clearance_threshold": 0.03,
+      "base_clearance_m": 0.04,
+      "lift_m": 0.08,
+      "landing_phase_start": 0.85,
+    },
+  )
+  cfg.rewards["motion_foot_lift_trajectory"] = RewardTermCfg(
+    func=mdp.motion_foot_lift_trajectory_penalty,
     weight=-2.0,
     params={
       "command_name": "motion",
       "foot_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
       "clearance_threshold": 0.03,
-      "margin_m": 0.10,
+      "base_clearance_m": 0.04,
+      "lift_m": 0.08,
+      "phase_power": 1.0,
+      "deadband_m": 0.01,
+    },
+  )
+  cfg.rewards["motion_late_swing_velocity"] = RewardTermCfg(
+    func=mdp.motion_late_swing_velocity_penalty,
+    weight=-0.35,
+    params={
+      "command_name": "motion",
+      "foot_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
+      "clearance_threshold": 0.03,
+      "velocity_phase_start": 0.80,
+      "max_downward_velocity_m_s": 0.40,
+    },
+  )
+  cfg.rewards["motion_early_swing_contact"] = RewardTermCfg(
+    func=mdp.motion_early_swing_contact_penalty,
+    weight=-0.75,
+    params={
+      "command_name": "motion",
+      "sensor_name": feet_ground_contact_cfg.name,
+      "foot_body_names": ("left_ankle_roll_link", "right_ankle_roll_link"),
+      "clearance_threshold": 0.03,
+      "landing_phase_start": 0.85,
     },
   )
 
