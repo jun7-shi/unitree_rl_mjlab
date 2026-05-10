@@ -49,6 +49,8 @@ class PlayConfig:
   """Show a realtime foot-grid velocity/force overlay in the Viser GUI."""
   foot_grid_overlay_points: int = 300
   """Number of virtual sole sample points per foot for the Viser foot-grid overlay."""
+  foot_grid_overlay_update_rate: Literal["control", "sim"] = "control"
+  """Foot-grid overlay update cadence: control step or physics sim step."""
   disable_foot_phase_observation: bool = False
   """Remove motion_foot_phase observations for legacy 160-dim tracking checkpoints."""
 
@@ -241,6 +243,7 @@ def run_play(task_id: str, cfg: PlayConfig):
         foot_grid_config=FootGridOverlayConfig(
           robot_name="g1",
           point_count=cfg.foot_grid_overlay_points,
+          update_rate=cfg.foot_grid_overlay_update_rate,
         ),
       ).run()
     else:

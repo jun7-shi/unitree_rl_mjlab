@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+import time
+import traceback
+from typing import Any, Literal
 
 import numpy as np
 import torch
@@ -11,6 +13,7 @@ import viser
 
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.viewer import ViserPlayViewer
+from mjlab.viewer.base import VerbosityLevel
 
 from .contact_backends import extract_capsule_contact_point_forces, extract_feet_contact_flags
 from .foot_grid import (
@@ -31,6 +34,7 @@ class FootGridOverlayConfig:
 
   robot_name: str = "g1"
   point_count: int = 300
+  update_rate: Literal["control", "sim"] = "control"
   width: int = 900
   panel_height: int = 220
   point_radius_px: int = 3
@@ -278,6 +282,8 @@ class ViserFootGridOverlay:
     self._last_force_n: np.ndarray | None = None
     self._last_contact: np.ndarray | None = None
     self._last_step_count = 0
+    self._last_substep_index: int | None = None
+    self._last_substep_count: int | None = None
     self._step = 0
 
   def setup(self, server: viser.ViserServer) -> None:
@@ -322,7 +328,14 @@ class ViserFootGridOverlay:
         jpeg_quality=90,
       )
 
-  def update(self, env_idx: int, step_count: int) -> None:
+  def update(
+    self,
+    env_idx: int,
+    step_count: int,
+    *,
+    substep_index: int | None = None,
+    substep_count: int | None = None,
+  ) -> None:
     """Update the GUI image from the current environment state."""
 
     if self._image_handle is None or self._rasterizer is None:
@@ -383,6 +396,8 @@ class ViserFootGridOverlay:
     self._last_force_n = force_n.astype(np.float32, copy=False)
     self._last_contact = contact
     self._last_step_count = step_count
+    self._last_substep_index = substep_index
+    self._last_substep_count = substep_count
     self._render_cached_frame()
     self._step = step_count
 
@@ -407,8 +422,11 @@ class ViserFootGridOverlay:
       contact=self._last_contact,
     )
     if self._status_handle is not None:
+      substep_text = ""
+      if self._last_substep_index is not None and self._last_substep_count is not None:
+        substep_text = f" | sim `{self._last_substep_index}/{self._last_substep_count}`"
       self._status_handle.content = (
-        f"Step `{self._last_step_count}` | "
+        f"Step `{self._last_step_count}`{substep_text} | "
         f"left `{'CONTACT' if self._last_contact[0] else 'AIR'}` | "
         f"right `{'CONTACT' if self._last_contact[1] else 'AIR'}` | "
         f"vz range `+/-{self._rasterizer.vz_limit_m_s:.2f} m/s` | "
@@ -436,7 +454,7 @@ class ViserFootGridOverlay:
 
 
 class FootGridViserPlayViewer(ViserPlayViewer):
-  """Viser play viewer that updates a foot-grid GUI image once per env step."""
+  """Viser play viewer that can update foot-grid GUI images per control or sim step."""
 
   def __init__(
     self,
@@ -447,12 +465,46 @@ class FootGridViserPlayViewer(ViserPlayViewer):
   ) -> None:
     super().__init__(env, policy)
     self._foot_grid_overlay = ViserFootGridOverlay(env.unwrapped, foot_grid_config)
+    self._foot_grid_update_rate = foot_grid_config.update_rate
+    self._foot_grid_action_pending = False
+    self._foot_grid_substep_index = 0
 
   def setup(self) -> None:
     super().setup()
     self._foot_grid_overlay.setup(self._server)
 
+  def _step_physics(self, dt: float) -> None:
+    if self._foot_grid_update_rate != "sim":
+      super()._step_physics(dt)
+      return
+
+    physics_dt = self.env.unwrapped.physics_dt
+    self._sim_budget += dt * self._time_multiplier
+    self._was_capped = False
+
+    if self._sim_budget < physics_dt:
+      return
+
+    self.sync_viewer_to_env()
+    hit_deadline = False
+    deadline = time.perf_counter() + self.frame_time
+    while self._sim_budget >= physics_dt:
+      if not self._execute_sim_substep():
+        self._sim_budget = 0.0
+        return
+      self._sim_budget -= physics_dt
+      if time.perf_counter() > deadline:
+        hit_deadline = True
+        break
+
+    if hit_deadline:
+      self._was_capped = self._sim_budget >= physics_dt
+      self._sim_budget = min(self._sim_budget, physics_dt)
+
   def _execute_step(self) -> bool:
+    if self._foot_grid_update_rate == "sim":
+      return self._execute_sim_substep()
+
     ok = super()._execute_step()
     if ok:
       self._foot_grid_overlay.update(self._scene.env_idx, self._step_count)
@@ -460,7 +512,92 @@ class FootGridViserPlayViewer(ViserPlayViewer):
 
   def reset_environment(self) -> None:
     super().reset_environment()
+    self._foot_grid_action_pending = False
+    self._foot_grid_substep_index = 0
     self._foot_grid_overlay.update(self._scene.env_idx, self._step_count)
+
+  def _execute_sim_substep(self) -> bool:
+    try:
+      with torch.no_grad():
+        self._execute_sim_substep_unchecked()
+        return True
+    except Exception:
+      self._last_error = traceback.format_exc()
+      self.log(
+        f"[ERROR] Exception during sim substep:\n{self._last_error}",
+        VerbosityLevel.SILENT,
+      )
+      self._foot_grid_action_pending = False
+      self._foot_grid_substep_index = 0
+      self.pause()
+      return False
+
+  def _execute_sim_substep_unchecked(self) -> None:
+    env = self.env.unwrapped
+    if not self._foot_grid_action_pending:
+      obs = self.env.get_observations()
+      actions = self.policy(obs)
+      clip_actions = getattr(self.env, "clip_actions", None)
+      if clip_actions is not None:
+        actions = torch.clamp(actions, -clip_actions, clip_actions)
+      env.action_manager.process_action(actions.to(env.device))
+      self._foot_grid_action_pending = True
+      self._foot_grid_substep_index = 0
+
+    env._sim_step_counter += 1
+    env.action_manager.apply_action()
+    env.scene.write_data_to_sim()
+    env.sim.step()
+    env.sim.forward()
+    env.scene.update(dt=env.physics_dt)
+
+    self._foot_grid_substep_index += 1
+    decimation = int(env.cfg.decimation)
+    self._foot_grid_overlay.update(
+      self._scene.env_idx,
+      self._step_count + 1,
+      substep_index=self._foot_grid_substep_index,
+      substep_count=decimation,
+    )
+    self._server.flush()
+
+    if self._foot_grid_substep_index >= decimation:
+      self._complete_sim_control_step()
+
+  def _complete_sim_control_step(self) -> None:
+    env = self.env.unwrapped
+    env.episode_length_buf += 1
+    env.common_step_counter += 1
+
+    env.reset_buf = env.termination_manager.compute()
+    env.reset_terminated = env.termination_manager.terminated
+    env.reset_time_outs = env.termination_manager.time_outs
+
+    env.reward_buf = env.reward_manager.compute(dt=env.step_dt)
+    env.metrics_manager.compute()
+
+    reset_env_ids = env.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+    if len(reset_env_ids) > 0:
+      env._reset_idx(reset_env_ids)
+      env.scene.write_data_to_sim()
+
+    env.sim.forward()
+    env.command_manager.compute(dt=env.step_dt)
+
+    if "step" in env.event_manager.available_modes:
+      env.event_manager.apply(mode="step", dt=env.step_dt)
+    if "interval" in env.event_manager.available_modes:
+      env.event_manager.apply(mode="interval", dt=env.step_dt)
+
+    env.sim.sense()
+    env.obs_buf = env.observation_manager.compute(update_history=True)
+    if not env.cfg.is_finite_horizon:
+      env.extras["time_outs"] = env.reset_time_outs
+
+    self._foot_grid_action_pending = False
+    self._foot_grid_substep_index = 0
+    self._step_count += 1
+    self._stats_steps += 1
 
 
 def _local_xy_to_human_view_pixels(

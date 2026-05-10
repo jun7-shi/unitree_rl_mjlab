@@ -4,6 +4,7 @@ import numpy as np
 
 from src.evaluation.silent_walking.viser_foot_grid_overlay import (
   FootGridOverlayRasterizer,
+  FootGridViserPlayViewer,
   ensure_foot_grid_capsule_contact_sensor,
   pressure_values_to_rgb,
 )
@@ -152,3 +153,33 @@ def test_ensure_foot_grid_capsule_contact_sensor_appends_once():
   assert point_sensor.reduce == "maxforce"
   assert point_sensor.global_frame is True
   assert {"found", "force", "pos", "normal", "tangent"}.issubset(point_sensor.fields)
+
+
+def test_foot_grid_sim_update_rate_steps_by_physics_dt():
+  class FakeUnwrapped:
+    physics_dt = 0.005
+    step_dt = 0.02
+
+  class FakeEnv:
+    unwrapped = FakeUnwrapped()
+
+  viewer = object.__new__(FootGridViserPlayViewer)
+  viewer.env = FakeEnv()
+  viewer.frame_time = 1.0
+  viewer._foot_grid_update_rate = "sim"
+  viewer._sim_budget = 0.0
+  viewer._time_multiplier = 1.0
+  viewer._was_capped = False
+  viewer.sync_viewer_to_env = lambda: None
+  steps = []
+
+  def execute_sim_substep():
+    steps.append(len(steps))
+    return True
+
+  viewer._execute_sim_substep = execute_sim_substep
+
+  viewer._step_physics(0.019)
+
+  assert len(steps) == 3
+  assert 0.003 < viewer._sim_budget < 0.005
