@@ -12,3 +12,9 @@ def test_evaluate_silent_walking_cli_help():
   assert proc.returncode == 0
   assert "robot" in proc.stdout
   assert "policy" in proc.stdout
+  assert "output-dir" in proc.stdout
+  assert "task-id" in proc.stdout
+  assert "motion-file" in proc.stdout
+  assert "fixed-command" in proc.stdout
+  assert "foot-grid-output-dir" in proc.stdout
+  assert "foot-grid-video-file" in proc.stdout

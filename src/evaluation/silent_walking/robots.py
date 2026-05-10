@@ -1,10 +1,15 @@
 """Robot registry for silent walking evaluation."""
 
+from dataclasses import dataclass
 import xml.etree.ElementTree as ET
 from typing import Iterable
 
 from src import SRC_PATH
 
+from .foot_grid import (
+  make_capsule_footprint_sample_offsets,
+  make_indexed_foot_grid_names,
+)
 from .types import RobotSpec
 
 _G1_XML = SRC_PATH / "assets" / "robots" / "unitree_g1" / "xmls" / "g1.xml"
@@ -96,6 +101,38 @@ _G1_FOOT_COLLISION_FROMTO_XY_M, _G1_FOOT_COLLISION_RADIUS_M = _foot_collision_ge
   _G1_XML,
   _FOOT_COLLISION_GEOM_NAMES,
 )
+_G1_FOOT_GRID_SHAPE = (0, 0)
+_G1_FOOT_GRID_OFFSETS_M = tuple(
+  tuple(float(value) for value in row)
+  for row in make_capsule_footprint_sample_offsets(
+    capsule_fromto_xy_m=_G1_FOOT_COLLISION_FROMTO_XY_M[:7],
+    z_m=-0.025,
+    target_count=30,
+  ).tolist()
+)
+
+
+@dataclass(frozen=True, slots=True)
+class FootProxySpec:
+  """Robot-specific foot proxy points used by silent walking telemetry."""
+
+  robot_name: str
+  foot_names: tuple[str, ...]
+  foot_site_names: tuple[str, ...]
+  foot_body_names: tuple[str, ...]
+  foot_collision_geom_names: tuple[str, ...]
+  heel_local_offset_m: tuple[float, float, float]
+  toe_local_offset_m: tuple[float, float, float]
+  foot_corner_names: tuple[str, ...]
+  foot_corner_local_offsets_m: tuple[tuple[float, float, float], ...]
+  foot_grid_names: tuple[str, ...]
+  foot_grid_shape: tuple[int, int]
+  foot_grid_local_offsets_m: tuple[tuple[float, float, float], ...]
+  heel_region_max_x_m: float
+  toe_region_min_x_m: float
+  contact_force_threshold_n: float = 1.0
+  touchdown_window_steps: int = 5
+  rolling_window_steps: int = 150
 
 
 ROBOT_REGISTRY: dict[str, RobotSpec] = {
@@ -123,6 +160,53 @@ ROBOT_REGISTRY: dict[str, RobotSpec] = {
   ),
 }
 
+FOOT_PROXY_REGISTRY: dict[str, FootProxySpec] = {
+  "g1": FootProxySpec(
+    robot_name="g1",
+    foot_names=("left", "right"),
+    foot_site_names=("left_foot", "right_foot"),
+    foot_body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+    foot_collision_geom_names=_FOOT_COLLISION_GEOM_NAMES,
+    heel_local_offset_m=(-0.055, 0.0, -0.025),
+    toe_local_offset_m=(0.13, 0.0, -0.025),
+    # These four analysis points come from scene_g1.xml, not from the default
+    # G1 asset XML. They are virtual telemetry points, not collision geoms.
+    foot_corner_names=("rear_left", "rear_right", "front_left", "front_right"),
+    foot_corner_local_offsets_m=(
+      (-0.05, 0.025, -0.03),
+      (-0.05, -0.025, -0.03),
+      (0.12, 0.03, -0.03),
+      (0.12, -0.03, -0.03),
+    ),
+    foot_grid_names=make_indexed_foot_grid_names(len(_G1_FOOT_GRID_OFFSETS_M)),
+    foot_grid_shape=_G1_FOOT_GRID_SHAPE,
+    foot_grid_local_offsets_m=_G1_FOOT_GRID_OFFSETS_M,
+    heel_region_max_x_m=-0.02,
+    toe_region_min_x_m=0.09,
+  ),
+  "bumi": FootProxySpec(
+    robot_name="bumi",
+    foot_names=("left", "right"),
+    foot_site_names=("left_foot", "right_foot"),
+    foot_body_names=("left_ankle_roll_link", "right_ankle_roll_link"),
+    foot_collision_geom_names=(),
+    heel_local_offset_m=(-0.055, 0.0, -0.025),
+    toe_local_offset_m=(0.13, 0.0, -0.025),
+    foot_corner_names=("rear_left", "rear_right", "front_left", "front_right"),
+    foot_corner_local_offsets_m=(
+      (-0.05, 0.025, -0.03),
+      (-0.05, -0.025, -0.03),
+      (0.12, 0.03, -0.03),
+      (0.12, -0.03, -0.03),
+    ),
+    foot_grid_names=(),
+    foot_grid_shape=(0, 0),
+    foot_grid_local_offsets_m=(),
+    heel_region_max_x_m=-0.02,
+    toe_region_min_x_m=0.09,
+  ),
+}
+
 
 def list_supported_robots() -> tuple[str, ...]:
   """Return the supported robot names in registry order."""
@@ -134,3 +218,9 @@ def get_robot_spec(robot_name: str) -> RobotSpec:
   """Return the metadata for a supported robot."""
 
   return ROBOT_REGISTRY[robot_name]
+
+
+def get_foot_proxy_spec(robot_name: str) -> FootProxySpec:
+  """Return foot proxy metadata for silent walking telemetry."""
+
+  return FOOT_PROXY_REGISTRY[robot_name]

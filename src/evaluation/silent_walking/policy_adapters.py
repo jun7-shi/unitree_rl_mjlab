@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from typing import Protocol
+import warnings
 
 import torch
 
@@ -88,8 +89,10 @@ class OnnxPolicyAdapter:
     )
     active_providers = self._session.get_providers()
     if _requires_cuda_provider(device) and "CUDAExecutionProvider" not in active_providers:
-      raise RuntimeError(
-        f"Requested ONNX device '{device}' but CUDAExecutionProvider is not active"
+      warnings.warn(
+        f"Requested ONNX device '{device}', but CUDAExecutionProvider is not active. "
+        "Using CPU ONNX inference and moving actions to the requested torch device.",
+        RuntimeWarning,
       )
     self._input_name = self._session.get_inputs()[0].name
 

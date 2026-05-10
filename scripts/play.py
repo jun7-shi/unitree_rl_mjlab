@@ -17,6 +17,11 @@ from mjlab.utils.os import get_wandb_checkpoint_path
 from mjlab.utils.torch import configure_torch_backends
 from mjlab.utils.wrappers import VideoRecorder
 from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
+from src.evaluation.silent_walking.viser_foot_grid_overlay import (
+  FootGridOverlayConfig,
+  FootGridViserPlayViewer,
+  ensure_foot_grid_capsule_contact_sensor,
+)
 
 
 @dataclass(frozen=True)
@@ -36,9 +41,32 @@ class PlayConfig:
   viewer: Literal["auto", "native", "viser"] = "auto"
   no_terminations: bool = False
   """Disable all termination conditions (useful for viewing motions with dummy agents)."""
+  quiet_overlay: bool = False
+  """Show live silent-walking foot Vz/loading/heel-toe telemetry in the viewer."""
+  quiet_robot: Literal["g1"] = "g1"
+  """Robot proxy to use for quiet telemetry."""
+  foot_grid_overlay: bool = False
+  """Show a realtime foot-grid velocity/force overlay in the Viser GUI."""
+  foot_grid_overlay_points: int = 300
+  """Number of virtual sole sample points per foot for the Viser foot-grid overlay."""
+  disable_foot_phase_observation: bool = False
+  """Remove motion_foot_phase observations for legacy 160-dim tracking checkpoints."""
 
   # Internal flag used by demo script.
   _demo_mode: tyro.conf.Suppress[bool] = False
+
+
+def _disable_foot_phase_observation(env_cfg) -> tuple[str, ...]:
+  """Remove phase observations from actor/critic groups when present."""
+
+  removed: list[str] = []
+  for group_name in ("actor", "critic"):
+    group = env_cfg.observations.get(group_name)
+    if group is None or "motion_foot_phase" not in group.terms:
+      continue
+    group.terms.pop("motion_foot_phase")
+    removed.append(f"{group_name}.motion_foot_phase")
+  return tuple(removed)
 
 
 def run_play(task_id: str, cfg: PlayConfig):
@@ -118,6 +146,22 @@ def run_play(task_id: str, cfg: PlayConfig):
     env_cfg.viewer.height = cfg.video_height
   if cfg.video_width is not None:
     env_cfg.viewer.width = cfg.video_width
+  if cfg.disable_foot_phase_observation:
+    removed = _disable_foot_phase_observation(env_cfg)
+    print(
+      "[INFO]: Disabled foot phase observations: "
+      + (", ".join(removed) if removed else "none found")
+    )
+  if cfg.foot_grid_overlay and cfg.quiet_overlay:
+    raise ValueError("--foot-grid-overlay and --quiet-overlay cannot be combined yet")
+  if cfg.foot_grid_overlay:
+    if "g1" not in task_id.lower():
+      raise ValueError("--foot-grid-overlay is currently wired only for G1 tasks")
+    ensure_foot_grid_capsule_contact_sensor(env_cfg, "g1")
+  if cfg.quiet_overlay:
+    from src.evaluation.silent_walking.runner import _ensure_capsule_contact_sensor
+
+    _ensure_capsule_contact_sensor(env_cfg, cfg.quiet_robot)
 
   render_mode = "rgb_array" if (TRAINED_MODE and cfg.video) else None
   if cfg.video and DUMMY_MODE:
@@ -167,15 +211,40 @@ def run_play(task_id: str, cfg: PlayConfig):
   # Handle "auto" viewer selection.
   if cfg.viewer == "auto":
     has_display = bool(os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY"))
-    resolved_viewer = "native" if has_display else "viser"
+    resolved_viewer = (
+      "viser"
+      if cfg.foot_grid_overlay
+      else ("native" if has_display else "viser")
+    )
     del has_display
   else:
     resolved_viewer = cfg.viewer
+  if cfg.foot_grid_overlay and resolved_viewer != "viser":
+    raise ValueError("--foot-grid-overlay requires --viewer viser")
 
   if resolved_viewer == "native":
-    NativeMujocoViewer(env, policy).run()
+    if cfg.quiet_overlay:
+      from src.evaluation.silent_walking.viewer_overlay import QuietNativeMujocoViewer
+
+      QuietNativeMujocoViewer(env, policy, robot_name=cfg.quiet_robot).run()
+    else:
+      NativeMujocoViewer(env, policy).run()
   elif resolved_viewer == "viser":
-    ViserPlayViewer(env, policy).run()
+    if cfg.quiet_overlay:
+      from src.evaluation.silent_walking.viewer_overlay import QuietViserPlayViewer
+
+      QuietViserPlayViewer(env, policy, robot_name=cfg.quiet_robot).run()
+    elif cfg.foot_grid_overlay:
+      FootGridViserPlayViewer(
+        env,
+        policy,
+        foot_grid_config=FootGridOverlayConfig(
+          robot_name="g1",
+          point_count=cfg.foot_grid_overlay_points,
+        ),
+      ).run()
+    else:
+      ViserPlayViewer(env, policy).run()
   else:
     raise RuntimeError(f"Unsupported viewer backend: {resolved_viewer}")
 

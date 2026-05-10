@@ -37,9 +37,12 @@ from .contact_backends import (
   extract_capsule_vertical_velocities,
   extract_feet_contact_flags,
   extract_feet_net_forces,
+  extract_foot_grid_velocities,
+  extract_foot_region_contact_flags,
   extract_foot_vertical_velocities,
   supports_contact_backend,
 )
+from .foot_grid import distribute_capsule_forces_to_foot_grid
 from .metrics import (
   combine_total_score,
   compute_body_smoothness_score,
@@ -49,7 +52,13 @@ from .metrics import (
   normalize_force_by_body_weight,
 )
 from .policy_adapters import PolicyAdapter, adapt_policy_path, is_checkpoint_path
-from .robots import get_robot_spec
+from .regional_contact import virtual_foot_corner_points
+from .robots import get_foot_proxy_spec, get_robot_spec
+from .telemetry import (
+  SilentTelemetryCollector,
+  foot_roll_angle_from_points,
+  virtual_heel_toe_points,
+)
 from .types import EpisodeMetricSummary, EpisodeMetricTrace
 
 
@@ -63,6 +72,43 @@ class SilentEvalResult:
   step_dt: float
   trace: EpisodeMetricTrace
   summary: EpisodeMetricSummary
+
+
+@dataclass(slots=True)
+class _SubstepTelemetryWindow:
+  """Substep telemetry collected inside one policy/control step."""
+
+  foot_force_n: list[torch.Tensor]
+  foot_site_vz_m_s: list[torch.Tensor]
+  foot_region_contact: list[torch.Tensor]
+  corner_downward_speeds_m_s: list[torch.Tensor]
+
+  @classmethod
+  def empty(cls) -> "_SubstepTelemetryWindow":
+    return cls([], [], [], [])
+
+  def append(
+    self,
+    *,
+    foot_force_n: torch.Tensor,
+    foot_site_vz_m_s: torch.Tensor,
+    foot_region_contact: torch.Tensor,
+    corner_downward_speeds_m_s: torch.Tensor,
+  ) -> None:
+    self.foot_force_n.append(foot_force_n.detach().clone())
+    self.foot_site_vz_m_s.append(foot_site_vz_m_s.detach().clone())
+    self.foot_region_contact.append(foot_region_contact.detach().clone())
+    self.corner_downward_speeds_m_s.append(corner_downward_speeds_m_s.detach().clone())
+
+  def as_record_kwargs(self) -> dict[str, torch.Tensor] | dict[str, None]:
+    if not self.foot_region_contact:
+      return {}
+    return {
+      "substep_foot_force_n": torch.stack(self.foot_force_n),
+      "substep_foot_site_vz_m_s": torch.stack(self.foot_site_vz_m_s),
+      "substep_foot_region_contact": torch.stack(self.foot_region_contact),
+      "substep_corner_downward_speeds_m_s": torch.stack(self.corner_downward_speeds_m_s),
+    }
 
 
 class _CallablePolicyAdapter:
@@ -98,26 +144,101 @@ def _ensure_capsule_contact_sensor(env_cfg, robot_name: str) -> None:
   """Attach a per-capsule ground contact sensor to the evaluation env config."""
 
   spec = get_robot_spec(robot_name)
-  sensor_name = "foot_capsule_ground_contact"
   existing_sensors = cfg_sensors = env_cfg.scene.sensors or ()
-  if any(sensor.name == sensor_name for sensor in cfg_sensors):
+  existing_names = {sensor.name for sensor in cfg_sensors}
+
+  new_sensors: list[ContactSensorCfg] = []
+  if "foot_capsule_ground_contact" not in existing_names:
+    new_sensors.append(
+      ContactSensorCfg(
+        name="foot_capsule_ground_contact",
+        primary=ContactMatch(
+          mode="geom",
+          pattern=spec.foot_collision_geom_names,
+          entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force"),
+        reduce="netforce",
+        num_slots=1,
+        track_air_time=True,
+      )
+    )
+  if "foot_capsule_ground_contact_points" not in existing_names:
+    new_sensors.append(
+      ContactSensorCfg(
+        name="foot_capsule_ground_contact_points",
+        primary=ContactMatch(
+          mode="geom",
+          pattern=spec.foot_collision_geom_names,
+          entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force", "pos"),
+        reduce="maxforce",
+        num_slots=1,
+      )
+    )
+  if not new_sensors:
     return
 
-  env_cfg.scene.sensors = existing_sensors + (
-    ContactSensorCfg(
-      name=sensor_name,
-      primary=ContactMatch(
-        mode="geom",
-        pattern=spec.foot_collision_geom_names,
-        entity="robot",
-      ),
-      secondary=ContactMatch(mode="body", pattern="terrain"),
-      fields=("found", "force"),
-      reduce="netforce",
-      num_slots=1,
-      track_air_time=True,
-    ),
-  )
+  env_cfg.scene.sensors = existing_sensors + tuple(new_sensors)
+
+
+def _disable_foot_phase_observation(env_cfg) -> None:
+  """Remove motion foot phase terms for legacy tracking checkpoints."""
+
+  for group_name in ("actor", "critic"):
+    group = env_cfg.observations.get(group_name)
+    if group is not None:
+      group.terms.pop("motion_foot_phase", None)
+
+
+def _configure_motion_file(env_cfg, motion_file: str | None) -> None:
+  """Inject a local tracking motion file when evaluating tracking policies."""
+
+  if motion_file is None:
+    return
+  motion_cmd = env_cfg.commands.get("motion")
+  if motion_cmd is None or not hasattr(motion_cmd, "motion_file"):
+    raise ValueError("--motion-file requires a task with a 'motion' command")
+  motion_cmd.motion_file = motion_file
+
+
+def _configure_fixed_velocity_command(
+  env_cfg,
+  fixed_command: tuple[float, float, float] | None,
+) -> None:
+  """Force a velocity task to use one constant command throughout evaluation."""
+
+  if fixed_command is None:
+    return
+  twist_cmd = env_cfg.commands.get("twist")
+  if twist_cmd is None or not hasattr(twist_cmd, "ranges"):
+    raise ValueError("--fixed-command requires a task with a 'twist' velocity command")
+  lin_x, lin_y, yaw = fixed_command
+  twist_cmd.ranges.lin_vel_x = (lin_x, lin_x)
+  twist_cmd.ranges.lin_vel_y = (lin_y, lin_y)
+  twist_cmd.ranges.ang_vel_z = (yaw, yaw)
+  if hasattr(twist_cmd, "rel_standing_envs"):
+    twist_cmd.rel_standing_envs = 0.0
+  if hasattr(twist_cmd, "heading_command"):
+    twist_cmd.heading_command = False
+  if getattr(twist_cmd.ranges, "heading", None) is not None:
+    twist_cmd.ranges.heading = None
+
+
+def _get_eval_command_velocity(env: ManagerBasedRlEnv, robot) -> torch.Tensor:
+  """Return velocity command when present; zeros for non-velocity evaluation tasks."""
+
+  try:
+    return env.command_manager.get_command("twist")
+  except KeyError:
+    return torch.zeros(
+      (env.num_envs, 3),
+      dtype=robot.data.root_link_lin_vel_b.dtype,
+      device=robot.data.root_link_lin_vel_b.device,
+    )
 
 
 def _unwrap_obs(obs: Any) -> Any:
@@ -156,6 +277,64 @@ def _step_env(env: ManagerBasedRlEnv, action: torch.Tensor) -> tuple[Any, torch.
   else:
     raise TypeError(f"Unsupported env.step tuple length: {len(step_result)}")
   return obs, _extract_actor_obs(obs)
+
+
+def _step_env_with_substep_telemetry(
+  env: ManagerBasedRlEnv,
+  action: torch.Tensor,
+  *,
+  robot_name: str,
+  foot_body_ids: list[int],
+) -> tuple[Any, torch.Tensor, _SubstepTelemetryWindow]:
+  """Step the env while sampling contact telemetry at physics-substep resolution.
+
+  This mirrors ``ManagerBasedRlEnv.step`` but inserts an evaluation-only sample
+  after every physics step. The policy still runs at the normal control rate.
+  """
+
+  substeps = _SubstepTelemetryWindow.empty()
+  env.action_manager.process_action(action.to(env.device))
+
+  for _ in range(env.cfg.decimation):
+    env._sim_step_counter += 1
+    env.action_manager.apply_action()
+    env.scene.write_data_to_sim()
+    env.sim.step()
+    env.sim.forward()
+    env.scene.update(dt=env.physics_dt)
+    _append_substep_telemetry(
+      substeps,
+      env=env,
+      robot_name=robot_name,
+      foot_body_ids=foot_body_ids,
+    )
+
+  env.episode_length_buf += 1
+  env.common_step_counter += 1
+
+  env.reset_buf = env.termination_manager.compute()
+  env.reset_terminated = env.termination_manager.terminated
+  env.reset_time_outs = env.termination_manager.time_outs
+
+  env.reward_buf = env.reward_manager.compute(dt=env.step_dt)
+  env.metrics_manager.compute()
+
+  reset_env_ids = env.reset_buf.nonzero(as_tuple=False).squeeze(-1)
+  if len(reset_env_ids) > 0:
+    env._reset_idx(reset_env_ids)
+    env.scene.write_data_to_sim()
+
+  env.sim.forward()
+  env.command_manager.compute(dt=env.step_dt)
+
+  if "step" in env.event_manager.available_modes:
+    env.event_manager.apply(mode="step", dt=env.step_dt)
+  if "interval" in env.event_manager.available_modes:
+    env.event_manager.apply(mode="interval", dt=env.step_dt)
+
+  env.sim.sense()
+  env.obs_buf = env.observation_manager.compute(update_history=True)
+  return env.obs_buf, _extract_actor_obs(env.obs_buf), substeps
 
 
 def _compute_touchdown_metrics(
@@ -220,6 +399,95 @@ def _summarize_channel_events(channel_events: list[torch.Tensor]) -> torch.Tenso
   return torch.stack([events.mean() for events in channel_events])
 
 
+def _extract_virtual_heel_toe_points(
+  env: ManagerBasedRlEnv,
+  robot_name: str,
+  foot_body_ids: list[int],
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+  """Extract virtual heel/toe points and a rigid-foot roll proxy."""
+
+  proxy = get_foot_proxy_spec(robot_name)
+  robot = env.scene["robot"]
+  body_pos_w = robot.data.body_link_pos_w[:, foot_body_ids]
+  body_quat_w = robot.data.body_link_quat_w[:, foot_body_ids]
+  heel_pos_w, toe_pos_w = virtual_heel_toe_points(
+    body_pos_w=body_pos_w,
+    body_quat_w=body_quat_w,
+    heel_local_offset_m=proxy.heel_local_offset_m,
+    toe_local_offset_m=proxy.toe_local_offset_m,
+  )
+  return heel_pos_w, toe_pos_w, foot_roll_angle_from_points(heel_pos_w, toe_pos_w)
+
+
+def _extract_virtual_foot_corner_points(
+  env: ManagerBasedRlEnv,
+  robot_name: str,
+  foot_body_ids: list[int],
+) -> torch.Tensor:
+  """Extract evaluator-local virtual 4-corner foot points."""
+
+  proxy = get_foot_proxy_spec(robot_name)
+  robot = env.scene["robot"]
+  body_pos_w = robot.data.body_link_pos_w[:, foot_body_ids]
+  body_quat_w = robot.data.body_link_quat_w[:, foot_body_ids]
+  return virtual_foot_corner_points(
+    body_pos_w=body_pos_w,
+    body_quat_w=body_quat_w,
+    corner_local_offsets_m=proxy.foot_corner_local_offsets_m,
+  )
+
+
+def _extract_virtual_foot_corner_downward_speeds(
+  env: ManagerBasedRlEnv,
+  robot_name: str,
+  foot_body_ids: list[int],
+) -> torch.Tensor:
+  """Extract instantaneous vertical speeds for evaluator-local foot corners."""
+
+  robot = env.scene["robot"]
+  body_pos_w = robot.data.body_link_pos_w[:, foot_body_ids]
+  body_lin_vel_w = robot.data.body_link_lin_vel_w[:, foot_body_ids]
+  body_ang_vel_w = robot.data.body_link_ang_vel_w[:, foot_body_ids]
+  corner_pos_w = _extract_virtual_foot_corner_points(env, robot_name, foot_body_ids)
+  rel_pos_w = corner_pos_w - body_pos_w.unsqueeze(2)
+  angular_velocity = torch.cross(
+    body_ang_vel_w.unsqueeze(2).expand_as(rel_pos_w),
+    rel_pos_w,
+    dim=-1,
+  )
+  corner_velocity_w = body_lin_vel_w.unsqueeze(2) + angular_velocity
+  return torch.clamp(-corner_velocity_w[..., 2], min=0.0)
+
+
+def _append_substep_telemetry(
+  window: _SubstepTelemetryWindow,
+  *,
+  env: ManagerBasedRlEnv,
+  robot_name: str,
+  foot_body_ids: list[int],
+) -> None:
+  """Append one physics-substep contact sample to the current control window."""
+
+  foot_force = extract_feet_net_forces(env, robot_name=robot_name)[..., 2].abs()
+  foot_site_vz = extract_foot_vertical_velocities(env, robot_name=robot_name)
+  foot_region_contact = extract_foot_region_contact_flags(
+    env,
+    robot_name,
+    foot_body_ids,
+  )
+  corner_downward_speeds = _extract_virtual_foot_corner_downward_speeds(
+    env,
+    robot_name,
+    foot_body_ids,
+  )
+  window.append(
+    foot_force_n=foot_force,
+    foot_site_vz_m_s=foot_site_vz,
+    foot_region_contact=foot_region_contact,
+    corner_downward_speeds_m_s=corner_downward_speeds,
+  )
+
+
 def _load_checkpoint_policy(
   task_id: str,
   env: ManagerBasedRlEnv,
@@ -264,50 +532,62 @@ def run_silent_eval(
   policy_adapter: str | PolicyAdapter,
   steps: int,
   device: str,
+  *,
+  task_id: str | None = None,
+  motion_file: str | None = None,
+  disable_foot_phase_observation: bool = False,
+  no_terminations: bool = False,
+  fixed_command: tuple[float, float, float] | None = None,
 ) -> SilentEvalResult:
   """Run a minimal silent-walking evaluation rollout."""
 
   configure_torch_backends()
 
   spec = get_robot_spec(robot_name)
+  resolved_task_id = task_id or spec.task_id
   _validate_runtime_support(robot_name)
-  env_cfg = load_env_cfg(spec.task_id, play=True)
+  env_cfg = load_env_cfg(resolved_task_id, play=True)
   env_cfg.scene.num_envs = 1
+  if no_terminations:
+    env_cfg.terminations = {}
+  _configure_motion_file(env_cfg, motion_file)
+  _configure_fixed_velocity_command(env_cfg, fixed_command)
+  if disable_foot_phase_observation:
+    _disable_foot_phase_observation(env_cfg)
   _ensure_capsule_contact_sensor(env_cfg, robot_name)
   env = ManagerBasedRlEnv(cfg=env_cfg, device=device, render_mode=None)
 
   try:
-    policy = _resolve_policy(spec.task_id, env, policy_adapter, device)
+    policy = _resolve_policy(resolved_task_id, env, policy_adapter, device)
     raw_obs = env.reset()
     obs = _extract_actor_obs(raw_obs)
     policy.reset()
 
-    peak_force_samples: list[torch.Tensor] = []
-    contact_flag_samples: list[torch.Tensor] = []
-    foot_vertical_velocity_samples: list[torch.Tensor] = []
-    capsule_force_samples: list[torch.Tensor] = []
-    capsule_contact_flag_samples: list[torch.Tensor] = []
-    capsule_vertical_velocity_samples: list[torch.Tensor] = []
+    proxy = get_foot_proxy_spec(robot_name)
+    robot = env.scene["robot"]
+    foot_body_ids, foot_body_names = robot.find_bodies(
+      proxy.foot_body_names,
+      preserve_order=True,
+    )
+    if tuple(foot_body_names) != proxy.foot_body_names:
+      raise RuntimeError("Foot body ordering does not match the telemetry proxy spec")
+
+    collector = SilentTelemetryCollector(
+      robot_name=robot_name,
+      dt=env.step_dt,
+      body_weight_newton=spec.mass_normalization,
+    )
     capsule_layout_xy: torch.Tensor | None = None
-    action_rate_samples: list[torch.Tensor] = []
-    command_velocity_samples: list[torch.Tensor] = []
-    actual_linear_velocity_samples: list[torch.Tensor] = []
-    actual_yaw_rate_samples: list[torch.Tensor] = []
-    linear_velocity_error_samples: list[torch.Tensor] = []
-    yaw_rate_error_samples: list[torch.Tensor] = []
-    previous_action: torch.Tensor | None = None
 
     for _ in range(steps):
       policy_obs = _unwrap_obs(raw_obs) if getattr(policy, "use_raw_obs", False) else obs
       action = policy.act(policy_obs)
-      if previous_action is None:
-        action_rate_samples.append(torch.zeros(1, device=action.device))
-      else:
-        action_rate_samples.append(
-          torch.linalg.norm(action - previous_action, dim=1)
-        )
-      previous_action = action.detach().clone()
-      raw_obs, obs = _step_env(env, action)
+      raw_obs, obs, substeps = _step_env_with_substep_telemetry(
+        env,
+        action,
+        robot_name=robot_name,
+        foot_body_ids=foot_body_ids,
+      )
       foot_force = extract_feet_net_forces(env, robot_name=robot_name)
       foot_contact = extract_feet_contact_flags(env, robot_name=robot_name)
       foot_vertical_velocity = extract_foot_vertical_velocities(env, robot_name=robot_name)
@@ -319,6 +599,9 @@ def run_silent_eval(
         env,
         robot_name=robot_name,
       )
+      foot_grid_names, foot_grid_local_xy, foot_grid_velocity = (
+        extract_foot_grid_velocities(env, robot_name=robot_name)
+      )
       capsule_layout_names, capsule_layout = extract_capsule_layout_positions(
         env,
         robot_name=robot_name,
@@ -329,186 +612,82 @@ def run_silent_eval(
         raise RuntimeError("Capsule force and layout ordering mismatch")
       if capsule_layout_xy is None:
         capsule_layout_xy = capsule_layout.squeeze(0).detach().clone()
-      peak_force_samples.append(foot_force[..., 2].abs().squeeze(0))
-      contact_flag_samples.append(foot_contact.squeeze(0))
-      foot_vertical_velocity_samples.append(foot_vertical_velocity.squeeze(0))
-      capsule_force_samples.append(capsule_force.squeeze(0))
-      capsule_contact_flag_samples.append(capsule_contact.squeeze(0))
-      capsule_vertical_velocity_samples.append(capsule_vertical_velocity.squeeze(0))
 
-      twist_command = env.command_manager.get_command("twist")
-      if twist_command is None:
-        raise RuntimeError("Velocity evaluation requires a 'twist' command term")
-      robot = env.scene["robot"]
-      command_velocity_samples.append(twist_command.squeeze(0).detach().clone())
-      actual_linear_velocity_samples.append(
-        robot.data.root_link_lin_vel_b[:, :2].squeeze(0).detach().clone()
+      command_velocity = _get_eval_command_velocity(env, robot)
+      heel_pos_w, toe_pos_w, foot_roll_angle = _extract_virtual_heel_toe_points(
+        env,
+        robot_name,
+        foot_body_ids,
       )
-      actual_yaw_rate_samples.append(
-        robot.data.root_link_ang_vel_b[:, 2].squeeze(0).detach().clone()
+      foot_corner_pos_w = _extract_virtual_foot_corner_points(
+        env,
+        robot_name,
+        foot_body_ids,
       )
-      linear_velocity_error_samples.append(
-        torch.linalg.norm(
-          twist_command[:, :2] - robot.data.root_link_lin_vel_b[:, :2],
-          dim=1,
+      foot_region_contact = extract_foot_region_contact_flags(
+        env,
+        robot_name,
+        foot_body_ids,
+      )
+      foot_grid_force = (
+        distribute_capsule_forces_to_foot_grid(
+          capsule_z_force_n=capsule_force,
+          capsule_fromto_xy_m=spec.foot_collision_fromto_xy_m,
+          capsule_radius_m=spec.foot_collision_radius_m,
+          local_xy_m=foot_grid_local_xy,
         )
+        if foot_grid_names and spec.foot_collision_fromto_xy_m
+        else None
       )
-      yaw_rate_error_samples.append(
-        torch.abs(twist_command[:, 2] - robot.data.root_link_ang_vel_b[:, 2])
+      collector.record_sample(
+        action=action,
+        command_velocity=command_velocity,
+        actual_linear_velocity=robot.data.root_link_lin_vel_b[:, :2],
+        actual_yaw_rate=robot.data.root_link_ang_vel_b[:, 2],
+        foot_force_n=foot_force[..., 2].abs(),
+        foot_contact=foot_contact,
+        foot_site_vz_m_s=foot_vertical_velocity,
+        capsule_names=capsule_names,
+        capsule_force_n=capsule_force,
+        capsule_contact=capsule_contact,
+        capsule_vz_m_s=capsule_vertical_velocity,
+        heel_pos_w=heel_pos_w,
+        toe_pos_w=toe_pos_w,
+        foot_roll_angle_rad=foot_roll_angle,
+        foot_corner_pos_w=foot_corner_pos_w,
+        foot_region_contact=foot_region_contact,
+        foot_grid_names=foot_grid_names,
+        foot_grid_local_xy_m=foot_grid_local_xy,
+        foot_grid_velocity_m_s=foot_grid_velocity if foot_grid_names else None,
+        foot_grid_force_n=foot_grid_force,
+        substep_dt=env.physics_dt,
+        **substeps.as_record_kwargs(),
       )
 
-    peak_force_series = torch.stack(peak_force_samples)
-    contact_flag_series = torch.stack(contact_flag_samples)
-    foot_vertical_velocity_series = torch.stack(foot_vertical_velocity_samples)
-    capsule_force_series = torch.stack(capsule_force_samples)
-    capsule_contact_flag_series = torch.stack(capsule_contact_flag_samples)
-    capsule_vertical_velocity_series = torch.stack(capsule_vertical_velocity_samples)
-    action_rate_series = torch.stack(action_rate_samples)
-    command_velocity_series = torch.stack(command_velocity_samples)
-    actual_linear_velocity_series = torch.stack(actual_linear_velocity_samples)
-    actual_yaw_rate_series = torch.stack(actual_yaw_rate_samples)
-    linear_velocity_error_series = torch.stack(linear_velocity_error_samples)
-    yaw_rate_error_series = torch.stack(yaw_rate_error_samples)
-    (
-      touchdown_peak_force_by_foot,
-      touchdown_loading_rate_by_foot,
-      touchdown_vertical_speed_by_foot,
-    ) = _compute_touchdown_metrics(
-      peak_force_series,
-      contact_flag_series,
-      dt=env.step_dt,
-      vertical_velocity_series=foot_vertical_velocity_series,
-    )
-    (
-      touchdown_peak_force_by_capsule,
-      touchdown_loading_rate_by_capsule,
-      touchdown_vertical_speed_by_capsule,
-    ) = _compute_touchdown_metrics(
-      capsule_force_series,
-      capsule_contact_flag_series,
-      dt=env.step_dt,
-      vertical_velocity_series=capsule_vertical_velocity_series,
-    )
-    left_touchdown_peak_force = touchdown_peak_force_by_foot[0]
-    right_touchdown_peak_force = touchdown_peak_force_by_foot[1]
-    left_touchdown_loading_rate = touchdown_loading_rate_by_foot[0]
-    right_touchdown_loading_rate = touchdown_loading_rate_by_foot[1]
-    left_touchdown_vertical_speed = touchdown_vertical_speed_by_foot[0]
-    right_touchdown_vertical_speed = touchdown_vertical_speed_by_foot[1]
-    touchdown_peak_force = torch.cat(touchdown_peak_force_by_foot)
-    touchdown_loading_rate = torch.cat(touchdown_loading_rate_by_foot)
-    touchdown_vertical_speed = torch.cat(touchdown_vertical_speed_by_foot)
-    peak_force_bw = normalize_force_by_body_weight(
-      touchdown_peak_force.mean(),
-      body_weight_newton=spec.mass_normalization,
-    )
-    touchdown_peak_force_bw = normalize_force_by_body_weight(
-      touchdown_peak_force,
-      body_weight_newton=spec.mass_normalization,
-    )
-    touchdown_loading_rate_bw_s = normalize_force_by_body_weight(
-      touchdown_loading_rate,
-      body_weight_newton=spec.mass_normalization,
-    )
-    left_touchdown_peak_force_bw = normalize_force_by_body_weight(
-      left_touchdown_peak_force,
-      body_weight_newton=spec.mass_normalization,
-    )
-    right_touchdown_peak_force_bw = normalize_force_by_body_weight(
-      right_touchdown_peak_force,
-      body_weight_newton=spec.mass_normalization,
-    )
-    left_touchdown_loading_rate_bw_s = normalize_force_by_body_weight(
-      left_touchdown_loading_rate,
-      body_weight_newton=spec.mass_normalization,
-    )
-    right_touchdown_loading_rate_bw_s = normalize_force_by_body_weight(
-      right_touchdown_loading_rate,
-      body_weight_newton=spec.mass_normalization,
-    )
-    capsule_touchdown_peak_force_bw = normalize_force_by_body_weight(
-      _summarize_channel_events(touchdown_peak_force_by_capsule),
-      body_weight_newton=spec.mass_normalization,
-    )
-    capsule_touchdown_loading_rate_bw_s = normalize_force_by_body_weight(
-      _summarize_channel_events(touchdown_loading_rate_by_capsule),
-      body_weight_newton=spec.mass_normalization,
-    )
-    capsule_touchdown_vertical_speed_m_s = _summarize_channel_events(
-      touchdown_vertical_speed_by_capsule
-    )
-    capsule_touchdown_count = torch.tensor(
-      [events.numel() for events in touchdown_peak_force_by_capsule],
-      dtype=torch.float32,
-    )
-    touchdown_peak_asymmetry_bw = torch.abs(
-      left_touchdown_peak_force_bw.mean() - right_touchdown_peak_force_bw.mean()
-    ).reshape(1)
-    loading_rate_bw_s = touchdown_loading_rate_bw_s.mean()
-    contact_quietness = compute_contact_quietness_score(
-      peak_force_bw=peak_force_bw,
-      loading_rate_bw_s=loading_rate_bw_s,
-    )
-    body_smoothness = compute_body_smoothness_score(action_rate_series.mean())
-    task_compliance = compute_task_compliance_score(
-      linear_velocity_error_series.mean(),
-      yaw_rate_error_series.mean(),
-    )
-    total_score = combine_total_score(
-      contact_quietness,
-      body_smoothness,
-      task_compliance,
-    )
-    trace = EpisodeMetricTrace(
-      foot_z_force_n=peak_force_series,
-      foot_contact_flag=contact_flag_series.float(),
-      foot_vertical_velocity_m_s=foot_vertical_velocity_series,
-      capsule_names=capsule_names,
-      capsule_layout_xy_m=capsule_layout_xy if capsule_layout_xy is not None else torch.zeros((0, 2)),
-      capsule_outline_fromto_xy_m=torch.tensor(
+    capsule_outline_fromto_xy_m = (
+      torch.tensor(
         spec.foot_collision_fromto_xy_m,
         dtype=torch.float32,
-      ) if spec.foot_collision_fromto_xy_m else torch.zeros((0, 2, 2), dtype=torch.float32),
-      capsule_radius_m=torch.tensor(
+      )
+      if spec.foot_collision_fromto_xy_m
+      else torch.zeros((0, 2, 2), dtype=torch.float32)
+    )
+    capsule_radius_m = (
+      torch.tensor(
         spec.foot_collision_radius_m,
         dtype=torch.float32,
-      ) if spec.foot_collision_radius_m else torch.zeros((0,), dtype=torch.float32),
-      capsule_z_force_n=capsule_force_series,
-      capsule_contact_flag=capsule_contact_flag_series.float(),
-      capsule_vertical_velocity_m_s=capsule_vertical_velocity_series,
-      peak_force_bw=peak_force_bw.reshape(1),
-      loading_rate_bw_s=loading_rate_bw_s.reshape(1),
-      touchdown_peak_force_bw=touchdown_peak_force_bw.flatten(),
-      touchdown_loading_rate_bw_s=touchdown_loading_rate_bw_s.flatten(),
-      touchdown_vertical_speed_m_s=touchdown_vertical_speed.flatten(),
-      left_touchdown_peak_force_bw=left_touchdown_peak_force_bw.flatten(),
-      right_touchdown_peak_force_bw=right_touchdown_peak_force_bw.flatten(),
-      left_touchdown_loading_rate_bw_s=left_touchdown_loading_rate_bw_s.flatten(),
-      right_touchdown_loading_rate_bw_s=right_touchdown_loading_rate_bw_s.flatten(),
-      left_touchdown_vertical_speed_m_s=left_touchdown_vertical_speed.flatten(),
-      right_touchdown_vertical_speed_m_s=right_touchdown_vertical_speed.flatten(),
-      touchdown_peak_asymmetry_bw=touchdown_peak_asymmetry_bw,
-      capsule_touchdown_peak_force_bw=capsule_touchdown_peak_force_bw.flatten(),
-      capsule_touchdown_loading_rate_bw_s=capsule_touchdown_loading_rate_bw_s.flatten(),
-      capsule_touchdown_vertical_speed_m_s=capsule_touchdown_vertical_speed_m_s.flatten(),
-      capsule_touchdown_count=capsule_touchdown_count.flatten(),
-      action_rate_l2=action_rate_series.flatten(),
-      command_velocity=command_velocity_series,
-      actual_linear_velocity=actual_linear_velocity_series,
-      actual_yaw_rate=actual_yaw_rate_series.flatten(),
-      linear_velocity_error=linear_velocity_error_series.flatten(),
-      yaw_rate_error=yaw_rate_error_series.flatten(),
-      contact_quietness_score=contact_quietness.reshape(1),
+      )
+      if spec.foot_collision_radius_m
+      else torch.zeros((0,), dtype=torch.float32)
     )
-    summary = EpisodeMetricSummary(
-      contact_quietness=float(contact_quietness.item()),
-      body_smoothness=float(body_smoothness.item()),
-      task_compliance=float(task_compliance.item()),
-      total_score=float(total_score.item()),
+    trace, summary = collector.to_trace_and_summary(
+      capsule_layout_xy_m=capsule_layout_xy,
+      capsule_outline_fromto_xy_m=capsule_outline_fromto_xy_m,
+      capsule_radius_m=capsule_radius_m,
     )
     return SilentEvalResult(
       robot_name=robot_name,
-      task_id=spec.task_id,
+      task_id=resolved_task_id,
       steps=steps,
       step_dt=env.step_dt,
       trace=trace,

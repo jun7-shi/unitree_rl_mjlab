@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from matplotlib import animation
 from matplotlib import cm
 from matplotlib import colors
+from matplotlib.colors import LinearSegmentedColormap
 from matplotlib.patches import Polygon
 import matplotlib.pyplot as plt
 import torch
 
+from .foot_grid import summarize_post_contact_foot_grid
 from .types import EpisodeMetricTrace
 
 
@@ -182,6 +185,369 @@ def save_capsule_force_timeseries_plot(
   fig.savefig(output, dpi=150)
   plt.close(fig)
   return output
+
+
+def save_foot_grid_post_contact_heatmap(
+  trace: EpisodeMetricTrace,
+  output_path: str | Path,
+  title: str,
+  *,
+  post_step: int = 0,
+) -> Path:
+  """Save per-foot heatmaps of post-contact virtual grid-point downward speed."""
+
+  output = Path(output_path)
+  output.parent.mkdir(parents=True, exist_ok=True)
+  rows = summarize_post_contact_foot_grid(trace, post_steps=(post_step,))
+  foot_names = tuple(dict.fromkeys(row.foot for row in rows))
+  if not rows or not foot_names:
+    fig, axis = plt.subplots(1, 1, figsize=(6, 4))
+    axis.set_title("No foot-grid touchdown data")
+    axis.set_axis_off()
+    fig.suptitle(title)
+    fig.savefig(output, dpi=150)
+    plt.close(fig)
+    return output
+
+  grid_rows, grid_cols = trace.foot_grid_shape
+  fig, axes = plt.subplots(
+    1,
+    len(foot_names),
+    figsize=(5 * len(foot_names), 4),
+    squeeze=False,
+    constrained_layout=True,
+  )
+  fig.suptitle(title)
+  values_for_norm = [
+    row.down_speed_mean_by_step_m_s.get(post_step, 0.0)
+    for row in rows
+  ]
+  norm = colors.Normalize(
+    vmin=0.0,
+    vmax=max(values_for_norm) if values_for_norm else 1.0,
+  )
+  cmap = cm.get_cmap("magma")
+  local_xy = trace.foot_grid_local_xy_m.detach().cpu() if trace.foot_grid_local_xy_m is not None else None
+  use_rectangular_grid = (
+    grid_rows > 0
+    and grid_cols > 0
+    and grid_rows * grid_cols == len(trace.foot_grid_names)
+  )
+
+  for axis, foot in zip(axes[0], foot_names, strict=True):
+    foot_rows = sorted(
+      (row for row in rows if row.foot == foot),
+      key=lambda row: row.point_index,
+    )
+    values = torch.tensor(
+      [row.down_speed_mean_by_step_m_s.get(post_step, 0.0) for row in foot_rows],
+      dtype=torch.float32,
+    )
+    if use_rectangular_grid:
+      image = axis.imshow(
+        values.reshape(grid_rows, grid_cols).numpy(),
+        origin="lower",
+        cmap=cmap,
+        norm=norm,
+        aspect="auto",
+      )
+    else:
+      if local_xy is None:
+        raise ValueError("irregular foot-grid heatmap requires local XY point coordinates")
+      image = axis.scatter(
+        local_xy[:, 0].numpy(),
+        local_xy[:, 1].numpy(),
+        c=values.numpy(),
+        cmap=cmap,
+        norm=norm,
+        s=90,
+        edgecolors="black",
+        linewidths=0.4,
+      )
+      axis.set_aspect("equal", adjustable="box")
+    axis.set_title(f"{foot} foot")
+    axis.set_xlabel("Local x / fore-aft (m)" if not use_rectangular_grid else "Lateral grid index")
+    axis.set_ylabel("Local y / lateral (m)" if not use_rectangular_grid else "Fore-aft grid index")
+    if use_rectangular_grid:
+      shaped_values = values.reshape(grid_rows, grid_cols)
+      for row_index in range(grid_rows):
+        for col_index in range(grid_cols):
+          axis.text(
+            col_index,
+            row_index,
+            f"{shaped_values[row_index, col_index].item():.2f}",
+            ha="center",
+            va="center",
+            fontsize=7,
+            color="white" if shaped_values[row_index, col_index].item() > norm.vmax * 0.45 else "black",
+          )
+  fig.colorbar(image, ax=axes[0].tolist(), shrink=0.85, label="Downward speed (m/s)")
+  fig.savefig(output, dpi=150)
+  plt.close(fig)
+  return output
+
+
+def save_foot_grid_velocity_video(
+  trace: EpisodeMetricTrace,
+  output_path: str | Path,
+  title: str,
+  dt: float,
+  *,
+  stride: int = 1,
+  fps: int | None = None,
+  metric: str = "downward_speed",
+  include_pressure: bool = False,
+) -> Path:
+  """Save an animated foot-grid velocity heatmap over rollout time."""
+
+  if dt <= 0.0:
+    raise ValueError("dt must be positive")
+  if stride <= 0:
+    raise ValueError("stride must be positive")
+  if fps is not None and fps <= 0:
+    raise ValueError("fps must be positive")
+  if metric not in {"downward_speed", "signed_vz", "speed"}:
+    raise ValueError("metric must be one of: downward_speed, signed_vz, speed")
+
+  output = Path(output_path)
+  output.parent.mkdir(parents=True, exist_ok=True)
+  if trace.foot_grid_velocity_m_s is None:
+    raise ValueError("trace does not contain foot-grid velocity frames")
+  grid_velocity = trace.foot_grid_velocity_m_s.detach().cpu()
+  if grid_velocity.ndim != 4 or grid_velocity.shape[-1] != 3:
+    raise ValueError("foot_grid_velocity_m_s must have shape [T, F, P, 3]")
+  pressure_values = None
+  if include_pressure:
+    if trace.foot_grid_force_n is None:
+      raise ValueError("include_pressure requires foot_grid_force_n in the trace")
+    pressure_source = trace.foot_grid_force_n.detach().cpu()
+    if pressure_source.shape != grid_velocity.shape[:3]:
+      raise ValueError("foot_grid_force_n must have shape [T, F, P]")
+    pressure_values = pressure_source[::stride]
+  if metric == "downward_speed":
+    point_values = torch.clamp(-grid_velocity[..., 2], min=0.0)[::stride]
+    cmap = cm.get_cmap("magma")
+    vmin = 0.0
+    vmax = float(point_values.max().item()) if point_values.numel() else 1.0
+    colorbar_label = "Downward speed (m/s)"
+  elif metric == "signed_vz":
+    point_values = grid_velocity[..., 2][::stride]
+    limit = float(point_values.abs().max().item()) if point_values.numel() else 1.0
+    cmap = _signed_vz_video_colormap()
+    vmin = -max(limit, 1.0e-6)
+    vmax = max(limit, 1.0e-6)
+    colorbar_label = "Signed Vz (m/s)"
+  else:
+    point_values = torch.linalg.norm(grid_velocity, dim=-1)[::stride]
+    cmap = cm.get_cmap("viridis")
+    vmin = 0.0
+    vmax = float(point_values.max().item()) if point_values.numel() else 1.0
+    colorbar_label = "3D speed (m/s)"
+
+  contact = trace.foot_contact_flag.detach().cpu().bool()[::stride]
+  foot_names = ("left", "right")
+  vmax = max(vmax, 1.0e-6)
+  norm = (
+    colors.TwoSlopeNorm(vmin=vmin, vcenter=0.0, vmax=vmax)
+    if metric == "signed_vz"
+    else colors.Normalize(vmin=vmin, vmax=vmax)
+  )
+  video_fps = int(fps) if fps is not None else max(1, round(1.0 / (dt * stride)))
+  grid_rows, grid_cols = trace.foot_grid_shape
+  use_rectangular_grid = (
+    grid_rows > 0
+    and grid_cols > 0
+    and grid_rows * grid_cols == point_values.shape[2]
+  )
+  if use_rectangular_grid:
+    frames = point_values.reshape(point_values.shape[0], point_values.shape[1], grid_rows, grid_cols)
+    pressure_frames = (
+      pressure_values.reshape(pressure_values.shape[0], pressure_values.shape[1], grid_rows, grid_cols)
+      if pressure_values is not None
+      else None
+    )
+  else:
+    frames = None
+    pressure_frames = None
+  local_xy = trace.foot_grid_local_xy_m.detach().cpu() if trace.foot_grid_local_xy_m is not None else None
+  foot_count = point_values.shape[1]
+  row_count = 2 if include_pressure else 1
+  pressure_cmap = _pressure_video_colormap()
+  pressure_norm = None
+  if pressure_values is not None:
+    pressure_norm = colors.Normalize(
+      vmin=0.0,
+      vmax=max(float(pressure_values.max().item()) if pressure_values.numel() else 1.0, 1.0e-6),
+    )
+
+  fig, axes = plt.subplots(
+    row_count,
+    foot_count,
+    figsize=(5 * foot_count, 4 * row_count),
+    squeeze=False,
+    constrained_layout=True,
+  )
+  fig.suptitle(title)
+  artists = []
+  pressure_artists = []
+  contact_badges = []
+  for foot_idx, axis in enumerate(axes[0]):
+    if use_rectangular_grid:
+      artist = axis.imshow(
+        frames[0, foot_idx].numpy(),
+        origin="lower",
+        cmap=cmap,
+        norm=norm,
+        aspect="auto",
+        animated=True,
+      )
+      axis.set_xlabel("Lateral grid index")
+      axis.set_ylabel("Fore-aft grid index")
+    else:
+      if local_xy is None:
+        raise ValueError("irregular foot-grid video requires local XY point coordinates")
+      artist = axis.scatter(
+        local_xy[:, 0].numpy(),
+        local_xy[:, 1].numpy(),
+        c=point_values[0, foot_idx].numpy(),
+        cmap=cmap,
+        norm=norm,
+        s=90,
+        edgecolors="black",
+        linewidths=0.4,
+        animated=True,
+      )
+      axis.set_aspect("equal", adjustable="box")
+      axis.set_xlabel("Local x / fore-aft (m)")
+      axis.set_ylabel("Local y / lateral (m)")
+    badge = axis.text(
+      0.03,
+      0.96,
+      "",
+      transform=axis.transAxes,
+      ha="left",
+      va="top",
+      fontsize=12,
+      fontweight="bold",
+      color="white",
+      bbox={
+        "boxstyle": "round,pad=0.35",
+        "facecolor": "#6b7280",
+        "edgecolor": "white",
+        "linewidth": 1.2,
+        "alpha": 0.95,
+      },
+    )
+    artists.append(artist)
+    contact_badges.append(badge)
+  fig.colorbar(artists[0], ax=axes[0].tolist(), shrink=0.85, label=colorbar_label)
+  if include_pressure and pressure_values is not None and pressure_norm is not None:
+    for foot_idx, axis in enumerate(axes[1]):
+      if use_rectangular_grid:
+        pressure_artist = axis.imshow(
+          pressure_frames[0, foot_idx].numpy(),
+          origin="lower",
+          cmap=pressure_cmap,
+          norm=pressure_norm,
+          aspect="auto",
+          animated=True,
+        )
+        axis.set_xlabel("Lateral grid index")
+        axis.set_ylabel("Fore-aft grid index")
+      else:
+        if local_xy is None:
+          raise ValueError("irregular foot-grid pressure row requires local XY point coordinates")
+        pressure_artist = axis.scatter(
+          local_xy[:, 0].numpy(),
+          local_xy[:, 1].numpy(),
+          c=pressure_values[0, foot_idx].numpy(),
+          cmap=pressure_cmap,
+          norm=pressure_norm,
+          s=90,
+          edgecolors="black",
+          linewidths=0.4,
+          animated=True,
+        )
+        axis.set_aspect("equal", adjustable="box")
+        axis.set_xlabel("Local x / fore-aft (m)")
+        axis.set_ylabel("Local y / lateral (m)")
+      foot_name = foot_names[foot_idx] if foot_idx < len(foot_names) else f"foot {foot_idx}"
+      axis.set_title(f"{foot_name} foot force proxy")
+      pressure_artists.append(pressure_artist)
+    fig.colorbar(
+      pressure_artists[0],
+      ax=axes[1].tolist(),
+      shrink=0.85,
+      label="Normal force proxy (N)",
+    )
+
+  def update(frame_idx: int):
+    time_s = frame_idx * stride * dt
+    for foot_idx, artist in enumerate(artists):
+      if use_rectangular_grid:
+        artist.set_array(frames[frame_idx, foot_idx].numpy())
+      else:
+        artist.set_array(point_values[frame_idx, foot_idx].numpy())
+      foot_name = foot_names[foot_idx] if foot_idx < len(foot_names) else f"foot {foot_idx}"
+      is_contact = bool(contact[frame_idx, foot_idx].item())
+      contact_label = "CONTACT" if is_contact else "AIR"
+      badge = contact_badges[foot_idx]
+      badge.set_text(contact_label)
+      badge.get_bbox_patch().set_facecolor("#dc2626" if is_contact else "#6b7280")
+      axes[0, foot_idx].set_title(f"{foot_name} foot | t={time_s:.2f}s")
+    for foot_idx, pressure_artist in enumerate(pressure_artists):
+      if use_rectangular_grid:
+        pressure_artist.set_array(pressure_frames[frame_idx, foot_idx].numpy())
+      else:
+        pressure_artist.set_array(pressure_values[frame_idx, foot_idx].numpy())
+    return artists + pressure_artists + contact_badges
+
+  movie = animation.FuncAnimation(
+    fig,
+    update,
+    frames=point_values.shape[0],
+    interval=1000.0 / video_fps,
+    blit=False,
+  )
+  suffix = output.suffix.lower()
+  if suffix == ".gif":
+    writer = animation.PillowWriter(fps=video_fps)
+  elif suffix == ".mp4":
+    if not animation.writers.is_available("ffmpeg"):
+      plt.close(fig)
+      raise RuntimeError("Saving MP4 foot-grid video requires ffmpeg; use .gif instead")
+    writer = animation.FFMpegWriter(fps=video_fps)
+  else:
+    plt.close(fig)
+    raise ValueError("foot-grid video output must end with .gif or .mp4")
+  movie.save(output, writer=writer)
+  plt.close(fig)
+  return output
+
+
+def _signed_vz_video_colormap() -> LinearSegmentedColormap:
+  """Return a high-contrast signed vertical velocity map: negative red, zero white, positive blue."""
+
+  return LinearSegmentedColormap.from_list(
+    "signed_vz_red_white_blue",
+    [(0.0, "#b91c1c"), (0.5, "#ffffff"), (1.0, "#1d4ed8")],
+    N=257,
+  )
+
+
+def _pressure_video_colormap() -> LinearSegmentedColormap:
+  """Return a force-proxy map with exact white at zero force."""
+
+  return LinearSegmentedColormap.from_list(
+    "pressure_white_yellow_red",
+    [
+      (0.0, "#ffffff"),
+      (0.25, "#fde68a"),
+      (0.65, "#f97316"),
+      (1.0, "#991b1b"),
+    ],
+    N=257,
+  )
 
 
 def _normalize_capsule_layout(

@@ -88,3 +88,37 @@ class EpisodeMetricTrace:
   linear_velocity_error: torch.Tensor
   yaw_rate_error: torch.Tensor
   contact_quietness_score: torch.Tensor
+  foot_grid_names: tuple[str, ...] = ()
+  foot_grid_shape: tuple[int, int] = (0, 0)
+  foot_grid_local_xy_m: torch.Tensor | None = None
+  foot_grid_velocity_m_s: torch.Tensor | None = None
+  foot_grid_force_n: torch.Tensor | None = None
+  foot_loading_rate_n_s: torch.Tensor | None = None
+  foot_loading_rate_bw_s: torch.Tensor | None = None
+  heel_vertical_velocity_m_s: torch.Tensor | None = None
+  toe_vertical_velocity_m_s: torch.Tensor | None = None
+  heel_height_m: torch.Tensor | None = None
+  toe_height_m: torch.Tensor | None = None
+  foot_roll_angle_rad: torch.Tensor | None = None
+  touchdown_heel_vz_m_s: torch.Tensor | None = None
+  touchdown_toe_vz_m_s: torch.Tensor | None = None
+  touchdown_roll_angle_rad: torch.Tensor | None = None
+  touchdown_first_contact_region: tuple[str, ...] = ()
+  foot_region_names: tuple[str, ...] = ()
+  foot_region_contact_flag: torch.Tensor | None = None
+  foot_corner_names: tuple[str, ...] = ()
+  foot_corner_height_m: torch.Tensor | None = None
+  foot_corner_vertical_velocity_m_s: torch.Tensor | None = None
+  region_event_type: tuple[str, ...] = ()
+  region_event_stance_id: torch.Tensor | None = None
+  region_event_step: torch.Tensor | None = None
+  region_event_substep_index: torch.Tensor | None = None
+  region_event_time_offset_s: torch.Tensor | None = None
+  region_event_foot_index: torch.Tensor | None = None
+  region_event_foot: tuple[str, ...] = ()
+  region_event_regions: tuple[str, ...] = ()
+  region_event_peak_force_bw: torch.Tensor | None = None
+  region_event_loading_rate_bw_s: torch.Tensor | None = None
+  region_event_vertical_speed_m_s: torch.Tensor | None = None
+  region_event_corner_downward_speed_m_s: torch.Tensor | None = None
+  region_event_corner_downward_speeds_m_s: torch.Tensor | None = None
