@@ -106,6 +106,7 @@ _G1_FOOT_GRID_OFFSETS_M = tuple(
   tuple(float(value) for value in row)
   for row in make_capsule_footprint_sample_offsets(
     capsule_fromto_xy_m=_G1_FOOT_COLLISION_FROMTO_XY_M[:7],
+    capsule_radius_m=_G1_FOOT_COLLISION_RADIUS_M[:7],
     z_m=-0.025,
     target_count=30,
   ).tolist()

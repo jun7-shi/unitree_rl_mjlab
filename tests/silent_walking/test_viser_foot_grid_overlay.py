@@ -44,6 +44,40 @@ def test_foot_grid_overlay_rasterizer_draws_control_step_image():
   assert image[y, x].tolist() == [255, 255, 255]
 
 
+def test_foot_grid_overlay_rasterizer_uses_human_view_xy_orientation():
+  local_xy = np.array(
+    [
+      [-0.05, -0.02],
+      [0.13, -0.02],
+      [-0.05, 0.02],
+    ],
+    dtype=np.float32,
+  )
+  rasterizer = FootGridOverlayRasterizer(local_xy, width=240, panel_height=180)
+
+  rear_y, rear_x = rasterizer.point_pixel(row=0, foot_index=0, point_index=0)
+  toe_y, toe_x = rasterizer.point_pixel(row=0, foot_index=0, point_index=1)
+  lateral_y, lateral_x = rasterizer.point_pixel(row=0, foot_index=0, point_index=2)
+
+  assert abs(rear_x - toe_x) < abs(rear_y - toe_y)
+  assert abs(rear_x - lateral_x) > abs(rear_y - lateral_y)
+  assert toe_y < rear_y
+
+
+def test_foot_grid_overlay_pressure_uses_adaptive_scale_for_small_forces():
+  local_xy = np.array([[-0.05, -0.02], [0.13, 0.02]], dtype=np.float32)
+  rasterizer = FootGridOverlayRasterizer(local_xy, width=240, panel_height=180)
+  signed_vz = np.zeros((2, 2), dtype=np.float32)
+  force = np.zeros((2, 2), dtype=np.float32)
+  force[0, 0] = 0.2
+  contact = np.array([True, False])
+
+  image = rasterizer.render(signed_vz=signed_vz, force_n=force, contact=contact)
+
+  y, x = rasterizer.point_pixel(row=1, foot_index=0, point_index=0)
+  assert image[y, x].tolist() == [153, 27, 27]
+
+
 def test_ensure_foot_grid_capsule_contact_sensor_appends_once():
   @dataclass
   class FakeSensor:

@@ -93,12 +93,44 @@ def test_make_capsule_footprint_sample_offsets_follows_collision_sole_shape():
 
   assert offsets.shape == (30, 3)
   assert torch.allclose(offsets[:, 2], torch.full((30,), -0.025))
-  outer_lateral = offsets[torch.isclose(offsets[:, 1], torch.tensor(-0.0265))]
-  center_lateral = offsets[torch.isclose(offsets[:, 1], torch.tensor(0.0))]
-  assert outer_lateral.shape[0] == 2
-  assert center_lateral.shape[0] == 6
-  assert float(center_lateral[:, 0].min().item()) < -0.05
-  assert float(center_lateral[:, 0].max().item()) > 0.13
+  assert float(offsets[:, 0].min().item()) < -0.05
+  assert float(offsets[:, 0].max().item()) > 0.125
+  assert float((offsets[:, 0].max() - offsets[:, 0].min()).item()) > 0.17
+  assert float((offsets[:, 1].max() - offsets[:, 1].min()).item()) > 0.045
+  assert bool(
+    (
+      _min_distance_to_segments(offsets[:, :2], fromto_xy)
+      <= torch.tensor(0.010 + 1.0e-5)
+    ).all().item()
+  )
+
+
+def test_make_capsule_footprint_sample_offsets_uniformly_fills_sole_area():
+  fromto_xy = (
+    ((0.10, -0.026), (0.05, -0.027)),
+    ((-0.044, -0.018), (0.123, -0.018)),
+    ((-0.052, -0.010), (0.130, -0.010)),
+    ((-0.054, 0.000), (0.132, 0.000)),
+    ((-0.052, 0.010), (0.130, 0.010)),
+    ((-0.044, 0.018), (0.123, 0.018)),
+    ((0.10, 0.026), (0.05, 0.026)),
+  )
+
+  offsets = make_capsule_footprint_sample_offsets(
+    capsule_fromto_xy_m=fromto_xy,
+    z_m=-0.025,
+    target_count=80,
+  )
+
+  assert offsets.shape == (80, 3)
+  unique_y = torch.unique(torch.round(offsets[:, 1] * 10000.0) / 10000.0)
+  assert unique_y.numel() > len(fromto_xy)
+  assert bool(
+    (
+      _min_distance_to_segments(offsets[:, :2], fromto_xy)
+      <= torch.tensor(0.010 + 1.0e-5)
+    ).all().item()
+  )
 
 
 def test_foot_grid_point_velocities_include_body_angular_velocity():
@@ -325,3 +357,20 @@ def test_write_foot_grid_raw_csv_exports_per_frame_full_velocity(tmp_path):
   assert float(first["vz_m_s"]) == -0.3
   assert float(first["downward_speed_m_s"]) == 0.3
   assert first["foot_contact"] == "1"
+
+
+def _min_distance_to_segments(
+  points_xy: torch.Tensor,
+  fromto_xy: tuple[tuple[tuple[float, float], tuple[float, float]], ...],
+) -> torch.Tensor:
+  distances = []
+  for start_xy, end_xy in fromto_xy:
+    start = torch.tensor(start_xy, dtype=points_xy.dtype)
+    end = torch.tensor(end_xy, dtype=points_xy.dtype)
+    segment = end - start
+    length_sq = torch.dot(segment, segment).clamp_min(torch.finfo(points_xy.dtype).eps)
+    t = torch.sum((points_xy - start) * segment, dim=1) / length_sq
+    t = torch.clamp(t, min=0.0, max=1.0)
+    projection = start + t[:, None] * segment
+    distances.append(torch.linalg.norm(points_xy - projection, dim=1))
+  return torch.stack(distances, dim=1).min(dim=1).values

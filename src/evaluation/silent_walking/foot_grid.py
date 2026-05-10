@@ -54,58 +54,31 @@ def make_capsule_footprint_sample_offsets(
   capsule_fromto_xy_m: tuple[tuple[tuple[float, float], tuple[float, float]], ...],
   z_m: float,
   target_count: int,
+  capsule_radius_m: tuple[float, ...] | float = 0.01,
 ) -> torch.Tensor:
-  """Return local offsets sampled along collision capsule sole centerlines."""
+  """Return local offsets approximately uniformly filling the capsule footprint."""
 
   if target_count <= 0:
     raise ValueError("target_count must be positive")
   if not capsule_fromto_xy_m:
     return torch.zeros((0, 3), dtype=torch.float32)
-  if target_count < len(capsule_fromto_xy_m):
-    raise ValueError("target_count must cover every capsule row at least once")
 
-  segments = [
-    (
-      torch.tensor(start_xy, dtype=torch.float32),
-      torch.tensor(end_xy, dtype=torch.float32),
-    )
-    for start_xy, end_xy in capsule_fromto_xy_m
-  ]
-  lengths = torch.tensor(
-    [torch.linalg.norm(end_xy - start_xy).item() for start_xy, end_xy in segments],
-    dtype=torch.float64,
+  fromto = torch.tensor(capsule_fromto_xy_m, dtype=torch.float32)
+  radii = _normalize_capsule_radii(
+    capsule_radius_m,
+    count=fromto.shape[0],
+    dtype=fromto.dtype,
+    device=fromto.device,
   )
-  minimum = 2 if target_count >= 2 * len(segments) else 1
-  counts = torch.full((len(segments),), minimum, dtype=torch.int64)
-  remaining = target_count - int(counts.sum().item())
-  if remaining > 0:
-    eligible = lengths >= (0.5 * lengths.max())
-    if not bool(eligible.any().item()):
-      eligible = torch.ones_like(lengths, dtype=torch.bool)
-    eligible_lengths = torch.where(eligible, lengths, torch.zeros_like(lengths))
-    weights = eligible_lengths / eligible_lengths.sum().clamp_min(1.0e-12)
-    raw_extra = weights * remaining
-    extra = torch.floor(raw_extra).to(torch.int64)
-    counts += extra
-    leftover = target_count - int(counts.sum().item())
-    if leftover > 0:
-      order = torch.argsort(raw_extra - extra.to(raw_extra.dtype), descending=True)
-      for idx in order[:leftover]:
-        counts[int(idx.item())] += 1
-
-  points: list[torch.Tensor] = []
-  for (start_xy, end_xy), count in zip(segments, counts.tolist(), strict=True):
-    start_x = min(float(start_xy[0].item()), float(end_xy[0].item()))
-    end_x = max(float(start_xy[0].item()), float(end_xy[0].item()))
-    y = 0.5 * (float(start_xy[1].item()) + float(end_xy[1].item()))
-    if count == 1:
-      xs = torch.tensor([(start_x + end_x) * 0.5], dtype=torch.float32)
-    else:
-      xs = torch.linspace(start_x, end_x, count)
-    ys = torch.full_like(xs, y)
-    zs = torch.full_like(xs, float(z_m))
-    points.append(torch.stack((xs, ys, zs), dim=1))
-  return torch.cat(points, dim=0)
+  candidates = _capsule_footprint_candidates(
+    capsule_fromto_xy_m=fromto,
+    capsule_radius_m=radii,
+    target_count=target_count,
+  )
+  selected = _farthest_point_sample(candidates, target_count)
+  selected = _sort_xy(selected)
+  z = torch.full((selected.shape[0], 1), float(z_m), dtype=selected.dtype)
+  return torch.cat((selected, z), dim=1)
 
 
 def make_foot_grid_names(shape: tuple[int, int]) -> tuple[str, ...]:
@@ -447,6 +420,111 @@ def _capsule_to_grid_weights(
       raw_weight[int(torch.argmin(distance).item())] = 1.0
     weights.append(raw_weight / raw_weight.sum().clamp_min(torch.finfo(raw_weight.dtype).eps))
   return torch.stack(weights, dim=0)
+
+
+def _capsule_footprint_candidates(
+  *,
+  capsule_fromto_xy_m: torch.Tensor,
+  capsule_radius_m: torch.Tensor,
+  target_count: int,
+) -> torch.Tensor:
+  max_radius = float(capsule_radius_m.max().item())
+  min_xy = capsule_fromto_xy_m.amin(dim=(0, 1)) - max_radius
+  max_xy = capsule_fromto_xy_m.amax(dim=(0, 1)) + max_radius
+  span = torch.clamp(max_xy - min_xy, min=1.0e-6)
+  aspect = float((span[0] / span[1]).item())
+
+  candidates = torch.empty((0, 2), dtype=capsule_fromto_xy_m.dtype)
+  for multiplier in (4, 8, 16, 32, 64):
+    candidate_target = max(target_count * multiplier, target_count + 16)
+    nx = max(2, int(round((candidate_target * aspect) ** 0.5)))
+    ny = max(2, int((candidate_target + nx - 1) // nx))
+    xs = torch.linspace(float(min_xy[0].item()), float(max_xy[0].item()), nx)
+    ys = torch.linspace(float(min_xy[1].item()), float(max_xy[1].item()), ny)
+    grid_x = xs.repeat_interleave(ny)
+    grid_y = ys.repeat(nx)
+    points = torch.stack((grid_x, grid_y), dim=1)
+    inside = _inside_capsule_footprint(
+      points,
+      capsule_fromto_xy_m=capsule_fromto_xy_m,
+      capsule_radius_m=capsule_radius_m,
+    )
+    candidates = points[inside]
+    if candidates.shape[0] >= target_count:
+      return candidates
+
+  if candidates.shape[0] == 0:
+    centers = capsule_fromto_xy_m.mean(dim=1)
+    return centers[:target_count]
+  repeats = (target_count + candidates.shape[0] - 1) // candidates.shape[0]
+  return candidates.repeat((repeats, 1))[:target_count]
+
+
+def _inside_capsule_footprint(
+  points_xy: torch.Tensor,
+  *,
+  capsule_fromto_xy_m: torch.Tensor,
+  capsule_radius_m: torch.Tensor,
+) -> torch.Tensor:
+  distances = []
+  for capsule_idx in range(capsule_fromto_xy_m.shape[0]):
+    distances.append(
+      _distance_to_segment(
+        points_xy,
+        capsule_fromto_xy_m[capsule_idx, 0],
+        capsule_fromto_xy_m[capsule_idx, 1],
+      )
+      <= capsule_radius_m[capsule_idx]
+    )
+  return torch.stack(distances, dim=1).any(dim=1)
+
+
+def _farthest_point_sample(points_xy: torch.Tensor, target_count: int) -> torch.Tensor:
+  if points_xy.shape[0] <= target_count:
+    return points_xy
+
+  centroid = points_xy.mean(dim=0)
+  selected_indices = [
+    int(torch.argmin(torch.linalg.norm(points_xy - centroid, dim=1)).item())
+  ]
+  min_distance_sq = torch.full(
+    (points_xy.shape[0],),
+    torch.inf,
+    dtype=points_xy.dtype,
+    device=points_xy.device,
+  )
+  for _ in range(1, target_count):
+    selected = points_xy[selected_indices[-1]]
+    distance_sq = torch.sum((points_xy - selected) ** 2, dim=1)
+    min_distance_sq = torch.minimum(min_distance_sq, distance_sq)
+    selected_indices.append(int(torch.argmax(min_distance_sq).item()))
+  return points_xy[torch.tensor(selected_indices, dtype=torch.long, device=points_xy.device)]
+
+
+def _normalize_capsule_radii(
+  capsule_radius_m: tuple[float, ...] | float,
+  *,
+  count: int,
+  dtype: torch.dtype,
+  device: torch.device,
+) -> torch.Tensor:
+  if isinstance(capsule_radius_m, tuple):
+    if len(capsule_radius_m) < count:
+      raise ValueError("capsule_radius_m does not cover every capsule")
+    values = capsule_radius_m[:count]
+  else:
+    values = (float(capsule_radius_m),) * count
+  return torch.tensor(values, dtype=dtype, device=device).clamp_min(
+    torch.finfo(dtype).eps
+  )
+
+
+def _sort_xy(points_xy: torch.Tensor) -> torch.Tensor:
+  order = sorted(
+    range(points_xy.shape[0]),
+    key=lambda idx: (float(points_xy[idx, 0].item()), float(points_xy[idx, 1].item())),
+  )
+  return points_xy[torch.tensor(order, dtype=torch.long, device=points_xy.device)]
 
 
 def _distance_to_segment(

@@ -33,7 +33,7 @@ class FootGridOverlayConfig:
   panel_height: int = 220
   point_radius_px: int = 3
   vz_limit_m_s: float = 1.0
-  force_limit_n: float = 100.0
+  force_limit_n: float = 0.0
 
 
 def ensure_foot_grid_capsule_contact_sensor(env_cfg: Any, robot_name: str = "g1") -> None:
@@ -117,12 +117,14 @@ class FootGridOverlayRasterizer:
     panel_height: int = 220,
     point_radius_px: int = 3,
     vz_limit_m_s: float = 1.0,
-    force_limit_n: float = 100.0,
+    force_limit_n: float = 0.0,
   ) -> None:
     if local_xy_m.ndim != 2 or local_xy_m.shape[1] != 2:
       raise ValueError("local_xy_m must have shape [P, 2]")
     if width <= 0 or panel_height <= 0 or point_radius_px <= 0:
       raise ValueError("width, panel_height, and point_radius_px must be positive")
+    if force_limit_n < 0.0:
+      raise ValueError("force_limit_n must be non-negative")
     self.local_xy_m = local_xy_m.astype(np.float32, copy=True)
     self.width = int(width)
     self.panel_height = int(panel_height)
@@ -185,20 +187,32 @@ class FootGridOverlayRasterizer:
         foot_index=foot_idx,
         colors=pressure_values_to_rgb(
           force_n[foot_idx],
-          limit_n=self.force_limit_n,
+          limit_n=self._pressure_limit(force_n),
         ),
       )
     return image
 
   def _compute_panel_pixels(self, local_xy_m: np.ndarray) -> np.ndarray:
     padding = max(14, self.point_radius_px + 8)
-    x = local_xy_m[:, 0]
-    y = local_xy_m[:, 1]
-    x_span = max(float(x.max() - x.min()), 1.0e-6)
-    y_span = max(float(y.max() - y.min()), 1.0e-6)
-    px = padding + (x - float(x.min())) / x_span * (self._panel_width - 2 * padding - 1)
-    py = padding + (1.0 - (y - float(y.min())) / y_span) * (self.panel_height - 2 * padding - 1)
+    px = _scale_pixels(
+      local_xy_m[:, 1],
+      size=self._panel_width,
+      padding=padding,
+      invert=False,
+    )
+    py = _scale_pixels(
+      local_xy_m[:, 0],
+      size=self.panel_height,
+      padding=padding,
+      invert=True,
+    )
     return np.stack((np.rint(px), np.rint(py)), axis=1).astype(np.int32)
+
+  def _pressure_limit(self, force_n: np.ndarray) -> float:
+    if self.force_limit_n > 0.0:
+      return self.force_limit_n
+    max_force = float(np.nanmax(force_n)) if force_n.size else 0.0
+    return max(max_force, 1.0e-6)
 
   def _draw_points(
     self,
@@ -320,6 +334,7 @@ class ViserFootGridOverlay:
     self._body_ids = body_ids
     local_offsets = make_capsule_footprint_sample_offsets(
       capsule_fromto_xy_m=self.spec.foot_collision_fromto_xy_m[:7],
+      capsule_radius_m=self.spec.foot_collision_radius_m[:7],
       z_m=-0.025,
       target_count=self.config.point_count,
     )
@@ -358,6 +373,26 @@ class FootGridViserPlayViewer(ViserPlayViewer):
   def reset_environment(self) -> None:
     super().reset_environment()
     self._foot_grid_overlay.update(self._scene.env_idx, self._step_count)
+
+
+def _scale_pixels(
+  values: np.ndarray,
+  *,
+  size: int,
+  padding: int,
+  invert: bool,
+) -> np.ndarray:
+  values = np.asarray(values, dtype=np.float32)
+  usable = max(size - 2 * padding - 1, 1)
+  value_min = float(values.min())
+  value_max = float(values.max())
+  span = value_max - value_min
+  if span <= 1.0e-9:
+    return np.full_like(values, padding + usable * 0.5, dtype=np.float32)
+  normalized = (values - value_min) / span
+  if invert:
+    normalized = 1.0 - normalized
+  return padding + normalized * usable
 
 
 def _capsule_force_weights_np(
