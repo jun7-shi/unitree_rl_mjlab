@@ -51,6 +51,8 @@ class PlayConfig:
   """Number of virtual sole sample points per foot for the Viser foot-grid overlay."""
   foot_grid_overlay_update_rate: Literal["control", "sim"] = "control"
   """Foot-grid overlay update cadence: control step or physics sim step."""
+  foot_grid_overlay_force_slots: int = 4
+  """Strongest contact slots to keep per foot collision geom for the force overlay."""
   disable_foot_phase_observation: bool = False
   """Remove motion_foot_phase observations for legacy 160-dim tracking checkpoints."""
 
@@ -159,7 +161,11 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.foot_grid_overlay:
     if "g1" not in task_id.lower():
       raise ValueError("--foot-grid-overlay is currently wired only for G1 tasks")
-    ensure_foot_grid_capsule_contact_sensor(env_cfg, "g1")
+    ensure_foot_grid_capsule_contact_sensor(
+      env_cfg,
+      "g1",
+      force_slots=cfg.foot_grid_overlay_force_slots,
+    )
   if cfg.quiet_overlay:
     from src.evaluation.silent_walking.runner import _ensure_capsule_contact_sensor
 
@@ -244,6 +250,7 @@ def run_play(task_id: str, cfg: PlayConfig):
           robot_name="g1",
           point_count=cfg.foot_grid_overlay_points,
           update_rate=cfg.foot_grid_overlay_update_rate,
+          force_slots=cfg.foot_grid_overlay_force_slots,
         ),
       ).run()
     else:

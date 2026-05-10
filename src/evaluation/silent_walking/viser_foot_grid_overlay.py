@@ -40,11 +40,19 @@ class FootGridOverlayConfig:
   point_radius_px: int = 3
   vz_limit_m_s: float = 1.0
   force_limit_n: float = 0.0
+  force_slots: int = 4
 
 
-def ensure_foot_grid_capsule_contact_sensor(env_cfg: Any, robot_name: str = "g1") -> None:
+def ensure_foot_grid_capsule_contact_sensor(
+  env_cfg: Any,
+  robot_name: str = "g1",
+  *,
+  force_slots: int = 4,
+) -> None:
   """Attach the capsule contact sensor needed by the foot-grid force overlay."""
 
+  if force_slots <= 0:
+    raise ValueError("force_slots must be positive")
   spec = get_robot_spec(robot_name)
   existing_sensors = env_cfg.scene.sensors or ()
   existing_names = {sensor.name for sensor in existing_sensors}
@@ -77,7 +85,7 @@ def ensure_foot_grid_capsule_contact_sensor(env_cfg: Any, robot_name: str = "g1"
         secondary=ContactMatch(mode="body", pattern="terrain"),
         fields=("found", "force", "pos", "normal", "tangent"),
         reduce="maxforce",
-        num_slots=1,
+        num_slots=force_slots,
         global_frame=True,
       )
     )

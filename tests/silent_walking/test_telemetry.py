@@ -4,8 +4,9 @@ import torch
 
 from src.evaluation.silent_walking.contact_backends import (
   contact_points_to_foot_region_flags,
+  extract_capsule_contact_point_forces,
 )
-from src.evaluation.silent_walking.robots import get_foot_proxy_spec
+from src.evaluation.silent_walking.robots import get_foot_proxy_spec, get_robot_spec
 from src.evaluation.silent_walking.telemetry import (
   SilentTelemetryCollector,
   detect_touchdown,
@@ -65,6 +66,44 @@ class TelemetryHelperTests(unittest.TestCase):
     self.assertEqual(spec.foot_grid_shape, (0, 0))
     self.assertEqual(len(spec.foot_grid_names), 30)
     self.assertEqual(len(spec.foot_grid_local_offsets_m), 30)
+
+  def test_extract_capsule_contact_points_accepts_multiple_slots_per_geom(self):
+    class _Data:
+      pass
+
+    class _Sensor:
+      pass
+
+    outer_self = self
+
+    class _Scene:
+      def __init__(self, sensor):
+        self._sensor = sensor
+
+      def __getitem__(self, name):
+        outer_self.assertEqual(name, "foot_capsule_ground_contact_points")
+        return self._sensor
+
+    class _Env:
+      pass
+
+    spec = get_robot_spec("g1")
+    slot_count = 3
+    sensor = _Sensor()
+    sensor.data = _Data()
+    slot_total = len(spec.foot_collision_geom_names) * slot_count
+    sensor.data.found = torch.zeros(1, slot_total)
+    sensor.data.force = torch.zeros(1, slot_total, 3)
+    sensor.data.pos = torch.zeros(1, slot_total, 3)
+    env = _Env()
+    env.scene = _Scene(sensor)
+
+    names, force, mask, pos = extract_capsule_contact_point_forces(env, robot_name="g1")
+
+    self.assertEqual(names, spec.foot_collision_geom_names)
+    self.assertEqual(force.shape, (1, slot_total))
+    self.assertEqual(mask.shape, force.shape)
+    self.assertEqual(pos.shape, (1, slot_total, 3))
 
   def test_virtual_heel_toe_points_apply_offsets_with_identity_quaternion(self):
     body_pos = torch.zeros(1, 2, 3)

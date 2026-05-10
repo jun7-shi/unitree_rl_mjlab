@@ -16,9 +16,13 @@ class _FakeEnvCfg:
 
 class PlayConfigTests(unittest.TestCase):
   def test_foot_grid_overlay_update_rate_can_request_sim_steps(self):
-    cfg = PlayConfig(foot_grid_overlay_update_rate="sim")
+    cfg = PlayConfig(
+      foot_grid_overlay_update_rate="sim",
+      foot_grid_overlay_force_slots=4,
+    )
 
     self.assertEqual(cfg.foot_grid_overlay_update_rate, "sim")
+    self.assertEqual(cfg.foot_grid_overlay_force_slots, 4)
 
   def test_disable_foot_phase_observation_removes_actor_and_critic_terms(self):
     cfg = _FakeEnvCfg(

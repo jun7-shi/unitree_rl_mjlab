@@ -189,9 +189,9 @@ def extract_capsule_contact_point_forces(
   pos = sensor.data.pos
   if found is None or force is None or pos is None:
     raise RuntimeError("foot_capsule_ground_contact_points data is unavailable")
-  if found.shape[1] != len(spec.foot_collision_geom_names):
+  if found.shape[1] % len(spec.foot_collision_geom_names) != 0:
     raise RuntimeError(
-      "foot_capsule_ground_contact_points shape does not match robot foot collision geoms"
+      "foot_capsule_ground_contact_points shape is not a multiple of robot foot collision geoms"
     )
   return spec.foot_collision_geom_names, force[..., 2].abs(), found > 0, pos
 
@@ -214,9 +214,9 @@ def extract_capsule_contact_points(
   pos = sensor.data.pos
   if found is None or pos is None:
     raise RuntimeError("foot_capsule_ground_contact_points data is unavailable")
-  if found.shape[1] != len(spec.foot_collision_geom_names):
+  if found.shape[1] % len(spec.foot_collision_geom_names) != 0:
     raise RuntimeError(
-      "foot_capsule_ground_contact_points shape does not match robot foot collision geoms"
+      "foot_capsule_ground_contact_points shape is not a multiple of robot foot collision geoms"
     )
   return spec.foot_collision_geom_names, found > 0, pos
 
