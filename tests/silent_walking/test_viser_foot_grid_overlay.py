@@ -64,6 +64,31 @@ def test_foot_grid_overlay_rasterizer_uses_human_view_xy_orientation():
   assert toe_y < rear_y
 
 
+def test_foot_grid_overlay_rasterizer_preserves_local_xy_aspect_ratio():
+  local_xy = np.array(
+    [
+      [-0.05, -0.03],
+      [0.13, -0.03],
+      [-0.05, 0.03],
+    ],
+    dtype=np.float32,
+  )
+  rasterizer = FootGridOverlayRasterizer(local_xy, width=900, panel_height=220)
+
+  rear_y, rear_x = rasterizer.point_pixel(row=0, foot_index=0, point_index=0)
+  toe_y, toe_x = rasterizer.point_pixel(row=0, foot_index=0, point_index=1)
+  lateral_y, lateral_x = rasterizer.point_pixel(row=0, foot_index=0, point_index=2)
+
+  pixel_fore_aft = abs(toe_y - rear_y)
+  pixel_lateral = abs(lateral_x - rear_x)
+  actual_ratio = pixel_lateral / pixel_fore_aft
+  expected_ratio = 0.06 / 0.18
+
+  assert abs(actual_ratio - expected_ratio) < 0.05
+  assert abs(toe_x - rear_x) <= 1
+  assert abs(lateral_y - rear_y) <= 1
+
+
 def test_foot_grid_overlay_pressure_uses_adaptive_scale_for_small_forces():
   local_xy = np.array([[-0.05, -0.02], [0.13, 0.02]], dtype=np.float32)
   rasterizer = FootGridOverlayRasterizer(local_xy, width=240, panel_height=180)

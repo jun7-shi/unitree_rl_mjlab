@@ -194,19 +194,12 @@ class FootGridOverlayRasterizer:
 
   def _compute_panel_pixels(self, local_xy_m: np.ndarray) -> np.ndarray:
     padding = max(14, self.point_radius_px + 8)
-    px = _scale_pixels(
-      local_xy_m[:, 1],
-      size=self._panel_width,
+    return _local_xy_to_human_view_pixels(
+      local_xy_m,
+      panel_width=self._panel_width,
+      panel_height=self.panel_height,
       padding=padding,
-      invert=False,
     )
-    py = _scale_pixels(
-      local_xy_m[:, 0],
-      size=self.panel_height,
-      padding=padding,
-      invert=True,
-    )
-    return np.stack((np.rint(px), np.rint(py)), axis=1).astype(np.int32)
 
   def _pressure_limit(self, force_n: np.ndarray) -> float:
     if self.force_limit_n > 0.0:
@@ -375,24 +368,48 @@ class FootGridViserPlayViewer(ViserPlayViewer):
     self._foot_grid_overlay.update(self._scene.env_idx, self._step_count)
 
 
-def _scale_pixels(
-  values: np.ndarray,
+def _local_xy_to_human_view_pixels(
+  local_xy_m: np.ndarray,
   *,
-  size: int,
+  panel_width: int,
+  panel_height: int,
   padding: int,
-  invert: bool,
 ) -> np.ndarray:
-  values = np.asarray(values, dtype=np.float32)
-  usable = max(size - 2 * padding - 1, 1)
-  value_min = float(values.min())
-  value_max = float(values.max())
-  span = value_max - value_min
-  if span <= 1.0e-9:
-    return np.full_like(values, padding + usable * 0.5, dtype=np.float32)
-  normalized = (values - value_min) / span
-  if invert:
-    normalized = 1.0 - normalized
-  return padding + normalized * usable
+  local_xy_m = np.asarray(local_xy_m, dtype=np.float32)
+  local_x = local_xy_m[:, 0]
+  local_y = local_xy_m[:, 1]
+  usable_width = max(panel_width - 2 * padding - 1, 1)
+  usable_height = max(panel_height - 2 * padding - 1, 1)
+  x_min = float(local_x.min())
+  x_max = float(local_x.max())
+  y_min = float(local_y.min())
+  y_max = float(local_y.max())
+  x_span = x_max - x_min
+  y_span = y_max - y_min
+  eps = 1.0e-9
+  width_scale = usable_width / y_span if y_span > eps else np.inf
+  height_scale = usable_height / x_span if x_span > eps else np.inf
+  pixels_per_m = min(width_scale, height_scale)
+  if not np.isfinite(pixels_per_m):
+    px = np.full_like(local_y, padding + usable_width * 0.5, dtype=np.float32)
+    py = np.full_like(local_x, padding + usable_height * 0.5, dtype=np.float32)
+    return np.stack((np.rint(px), np.rint(py)), axis=1).astype(np.int32)
+
+  if y_span > eps:
+    drawn_width = y_span * pixels_per_m
+    left = padding + (usable_width - drawn_width) * 0.5
+    px = left + (local_y - y_min) * pixels_per_m
+  else:
+    px = np.full_like(local_y, padding + usable_width * 0.5, dtype=np.float32)
+
+  if x_span > eps:
+    drawn_height = x_span * pixels_per_m
+    top = padding + (usable_height - drawn_height) * 0.5
+    py = top + (x_max - local_x) * pixels_per_m
+  else:
+    py = np.full_like(local_x, padding + usable_height * 0.5, dtype=np.float32)
+
+  return np.stack((np.rint(px), np.rint(py)), axis=1).astype(np.int32)
 
 
 def _capsule_force_weights_np(

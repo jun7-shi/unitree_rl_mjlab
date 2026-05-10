@@ -133,6 +133,33 @@ def test_make_capsule_footprint_sample_offsets_uniformly_fills_sole_area():
   )
 
 
+def test_make_capsule_footprint_sample_offsets_avoids_lattice_rows():
+  fromto_xy = (
+    ((0.10, -0.026), (0.05, -0.027)),
+    ((-0.044, -0.018), (0.123, -0.018)),
+    ((-0.052, -0.010), (0.130, -0.010)),
+    ((-0.054, 0.000), (0.132, 0.000)),
+    ((-0.052, 0.010), (0.130, 0.010)),
+    ((-0.044, 0.018), (0.123, 0.018)),
+    ((0.10, 0.026), (0.05, 0.026)),
+  )
+
+  offsets = make_capsule_footprint_sample_offsets(
+    capsule_fromto_xy_m=fromto_xy,
+    z_m=-0.025,
+    target_count=300,
+  )
+
+  local_xy = offsets[:, :2]
+  rounded_y = torch.unique(torch.round(local_xy[:, 1] * 10000.0) / 10000.0)
+  distance = torch.cdist(local_xy, local_xy)
+  distance.fill_diagonal_(float("inf"))
+  nearest = distance.min(dim=1).values
+
+  assert rounded_y.numel() > 100
+  assert float(nearest.min().item()) > 0.0015
+
+
 def test_foot_grid_point_velocities_include_body_angular_velocity():
   offsets = torch.tensor([[[0.10, 0.0, 0.0]]])
   body_pos_w = torch.zeros(1, 1, 3)

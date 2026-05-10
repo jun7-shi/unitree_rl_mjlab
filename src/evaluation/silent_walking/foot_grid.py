@@ -432,18 +432,15 @@ def _capsule_footprint_candidates(
   min_xy = capsule_fromto_xy_m.amin(dim=(0, 1)) - max_radius
   max_xy = capsule_fromto_xy_m.amax(dim=(0, 1)) + max_radius
   span = torch.clamp(max_xy - min_xy, min=1.0e-6)
-  aspect = float((span[0] / span[1]).item())
 
   candidates = torch.empty((0, 2), dtype=capsule_fromto_xy_m.dtype)
-  for multiplier in (4, 8, 16, 32, 64):
-    candidate_target = max(target_count * multiplier, target_count + 16)
-    nx = max(2, int(round((candidate_target * aspect) ** 0.5)))
-    ny = max(2, int((candidate_target + nx - 1) // nx))
-    xs = torch.linspace(float(min_xy[0].item()), float(max_xy[0].item()), nx)
-    ys = torch.linspace(float(min_xy[1].item()), float(max_xy[1].item()), ny)
-    grid_x = xs.repeat_interleave(ny)
-    grid_y = ys.repeat(nx)
-    points = torch.stack((grid_x, grid_y), dim=1)
+  for multiplier in (64, 128, 256, 512, 1024):
+    candidate_target = max(target_count * multiplier, target_count + 512)
+    points = min_xy + _halton_2d(
+      candidate_target,
+      dtype=capsule_fromto_xy_m.dtype,
+      device=capsule_fromto_xy_m.device,
+    ) * span
     inside = _inside_capsule_footprint(
       points,
       capsule_fromto_xy_m=capsule_fromto_xy_m,
@@ -499,6 +496,33 @@ def _farthest_point_sample(points_xy: torch.Tensor, target_count: int) -> torch.
     min_distance_sq = torch.minimum(min_distance_sq, distance_sq)
     selected_indices.append(int(torch.argmax(min_distance_sq).item()))
   return points_xy[torch.tensor(selected_indices, dtype=torch.long, device=points_xy.device)]
+
+
+def _halton_2d(
+  count: int,
+  *,
+  dtype: torch.dtype,
+  device: torch.device,
+) -> torch.Tensor:
+  indices = torch.arange(1, count + 1, dtype=torch.long, device=device)
+  return torch.stack(
+    (
+      _van_der_corput(indices, base=2),
+      _van_der_corput(indices, base=3),
+    ),
+    dim=1,
+  ).to(dtype=dtype)
+
+
+def _van_der_corput(indices: torch.Tensor, *, base: int) -> torch.Tensor:
+  values = torch.zeros(indices.shape, dtype=torch.float32, device=indices.device)
+  remaining = indices.clone()
+  denominator = float(base)
+  while bool((remaining > 0).any().item()):
+    values += torch.remainder(remaining, base).to(torch.float32) / denominator
+    remaining = torch.div(remaining, base, rounding_mode="floor")
+    denominator *= float(base)
+  return values
 
 
 def _normalize_capsule_radii(
