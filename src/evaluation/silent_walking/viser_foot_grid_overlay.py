@@ -150,11 +150,12 @@ class FootGridOverlayRasterizer:
     self.width = int(width)
     self.panel_height = int(panel_height)
     self.point_radius_px = int(point_radius_px)
-    self.vz_limit_m_s = float(vz_limit_m_s)
     self.force_limit_n = float(force_limit_n)
     self.height = self.panel_height * 2
     self._panel_width = self.width // 2
     self._base_pixels = self._compute_panel_pixels(self.local_xy_m)
+    self.vz_limit_m_s = 1.0
+    self.set_vz_limit_m_s(vz_limit_m_s)
 
   def point_pixel(self, *, row: int, foot_index: int, point_index: int) -> tuple[int, int]:
     """Return the image pixel center for a rendered point."""
@@ -250,6 +251,13 @@ class FootGridOverlayRasterizer:
       disk = (xx - cx) ** 2 + (yy - cy) ** 2 <= radius ** 2
       image[y0:y1, x0:x1][disk] = colors[point_idx]
 
+  def set_vz_limit_m_s(self, limit_m_s: float) -> None:
+    """Set the signed-vz display range used by subsequent renders."""
+
+    if limit_m_s <= 0.0:
+      raise ValueError("limit_m_s must be positive")
+    self.vz_limit_m_s = float(limit_m_s)
+
 
 class ViserFootGridOverlay:
   """GUI image overlay for realtime foot-grid velocity and force proxy."""
@@ -265,6 +273,11 @@ class ViserFootGridOverlay:
     self._rasterizer: FootGridOverlayRasterizer | None = None
     self._image_handle: viser.GuiImageHandle | None = None
     self._status_handle: viser.GuiMarkdownHandle | None = None
+    self._vz_limit_handle: Any | None = None
+    self._last_signed_vz: np.ndarray | None = None
+    self._last_force_n: np.ndarray | None = None
+    self._last_contact: np.ndarray | None = None
+    self._last_step_count = 0
     self._step = 0
 
   def setup(self, server: viser.ViserServer) -> None:
@@ -283,6 +296,21 @@ class ViserFootGridOverlay:
     tab_group = server.gui.add_tab_group()
     with tab_group.add_tab("Foot Grid"):
       self._status_handle = server.gui.add_markdown("")
+      initial_vz_limit = float(self.config.vz_limit_m_s)
+      self._vz_limit_handle = server.gui.add_slider(
+        "Vz range +/- m/s",
+        min=0.05,
+        max=max(2.0, initial_vz_limit),
+        step=0.05,
+        initial_value=initial_vz_limit,
+        marks=((0.1, "0.1"), (0.5, "0.5"), (1.0, "1.0"), (2.0, "2.0")),
+        hint="Signed Vz color range.",
+      )
+
+      @self._vz_limit_handle.on_update
+      def _(_) -> None:
+        self._set_vz_limit_from_gui()
+
       self._image_handle = server.gui.add_image(
         image=np.full(
           (self._rasterizer.height, self._rasterizer.width, 3),
@@ -351,19 +379,41 @@ class ViserFootGridOverlay:
       local_xy_m=local_offsets[:, :2],
     )[env_idx].detach().cpu().numpy()
     contact = foot_contact[env_idx].detach().cpu().numpy().astype(bool)
+    self._last_signed_vz = signed_vz.astype(np.float32, copy=False)
+    self._last_force_n = force_n.astype(np.float32, copy=False)
+    self._last_contact = contact
+    self._last_step_count = step_count
+    self._render_cached_frame()
+    self._step = step_count
+
+  def _set_vz_limit_from_gui(self) -> None:
+    if self._vz_limit_handle is None or self._rasterizer is None:
+      return
+    self._rasterizer.set_vz_limit_m_s(float(self._vz_limit_handle.value))
+    self._render_cached_frame()
+
+  def _render_cached_frame(self) -> None:
+    if (
+      self._image_handle is None
+      or self._rasterizer is None
+      or self._last_signed_vz is None
+      or self._last_force_n is None
+      or self._last_contact is None
+    ):
+      return
     self._image_handle.image = self._rasterizer.render(
-      signed_vz=signed_vz,
-      force_n=force_n.astype(np.float32, copy=False),
-      contact=contact,
+      signed_vz=self._last_signed_vz,
+      force_n=self._last_force_n,
+      contact=self._last_contact,
     )
     if self._status_handle is not None:
       self._status_handle.content = (
-        f"Step `{step_count}` | "
-        f"left `{'CONTACT' if contact[0] else 'AIR'}` | "
-        f"right `{'CONTACT' if contact[1] else 'AIR'}` | "
-        f"max force `{float(force_n.max()):.1f} N`"
+        f"Step `{self._last_step_count}` | "
+        f"left `{'CONTACT' if self._last_contact[0] else 'AIR'}` | "
+        f"right `{'CONTACT' if self._last_contact[1] else 'AIR'}` | "
+        f"vz range `+/-{self._rasterizer.vz_limit_m_s:.2f} m/s` | "
+        f"max force `{float(self._last_force_n.max()):.1f} N`"
       )
-    self._step = step_count
 
   def _ensure_geometry(self) -> None:
     if self._body_ids is not None:

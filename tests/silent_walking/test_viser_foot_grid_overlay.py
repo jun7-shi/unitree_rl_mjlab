@@ -103,6 +103,28 @@ def test_foot_grid_overlay_pressure_uses_adaptive_scale_for_small_forces():
   assert image[y, x].tolist() == [153, 27, 27]
 
 
+def test_foot_grid_overlay_rasterizer_updates_signed_vz_limit_live():
+  local_xy = np.array([[-0.05, -0.02], [0.13, 0.02]], dtype=np.float32)
+  rasterizer = FootGridOverlayRasterizer(
+    local_xy,
+    width=240,
+    panel_height=180,
+    vz_limit_m_s=1.0,
+  )
+  signed_vz = np.zeros((2, 2), dtype=np.float32)
+  signed_vz[0, 0] = 0.5
+  force = np.zeros((2, 2), dtype=np.float32)
+  contact = np.array([False, False])
+
+  image_wide = rasterizer.render(signed_vz=signed_vz, force_n=force, contact=contact)
+  rasterizer.set_vz_limit_m_s(0.5)
+  image_narrow = rasterizer.render(signed_vz=signed_vz, force_n=force, contact=contact)
+
+  y, x = rasterizer.point_pixel(row=0, foot_index=0, point_index=0)
+  assert image_wide[y, x].tolist() != image_narrow[y, x].tolist()
+  assert image_narrow[y, x].tolist() == [29, 78, 216]
+
+
 def test_ensure_foot_grid_capsule_contact_sensor_appends_once():
   @dataclass
   class FakeSensor:
