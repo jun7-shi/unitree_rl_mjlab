@@ -32,6 +32,7 @@ from mjlab.utils.torch import configure_torch_backends
 import src.tasks  # noqa: F401
 
 from .contact_backends import (
+  extract_capsule_contact_point_forces,
   extract_capsule_contact_forces,
   extract_capsule_layout_positions,
   extract_capsule_vertical_velocities,
@@ -42,7 +43,7 @@ from .contact_backends import (
   extract_foot_vertical_velocities,
   supports_contact_backend,
 )
-from .foot_grid import distribute_capsule_forces_to_foot_grid
+from .foot_grid import distribute_contact_forces_to_foot_grid
 from .metrics import (
   combine_total_score,
   compute_body_smoothness_score,
@@ -53,6 +54,7 @@ from .metrics import (
 )
 from .policy_adapters import PolicyAdapter, adapt_policy_path, is_checkpoint_path
 from .regional_contact import virtual_foot_corner_points
+from .regional_contact import world_to_local_foot_points
 from .robots import get_foot_proxy_spec, get_robot_spec
 from .telemetry import (
   SilentTelemetryCollector,
@@ -174,9 +176,10 @@ def _ensure_capsule_contact_sensor(env_cfg, robot_name: str) -> None:
           entity="robot",
         ),
         secondary=ContactMatch(mode="body", pattern="terrain"),
-        fields=("found", "force", "pos"),
+        fields=("found", "force", "pos", "normal", "tangent"),
         reduce="maxforce",
         num_slots=1,
+        global_frame=True,
       )
     )
   if not new_sensors:
@@ -571,6 +574,7 @@ def run_silent_eval(
     )
     if tuple(foot_body_names) != proxy.foot_body_names:
       raise RuntimeError("Foot body ordering does not match the telemetry proxy spec")
+    num_feet = len(proxy.foot_names)
 
     collector = SilentTelemetryCollector(
       robot_name=robot_name,
@@ -595,6 +599,9 @@ def run_silent_eval(
         env,
         robot_name=robot_name,
       )
+      contact_point_names, contact_point_force, contact_point_mask, contact_point_pos = (
+        extract_capsule_contact_point_forces(env, robot_name=robot_name)
+      )
       capsule_velocity_names, capsule_vertical_velocity = extract_capsule_vertical_velocities(
         env,
         robot_name=robot_name,
@@ -610,6 +617,8 @@ def run_silent_eval(
         raise RuntimeError("Capsule force and velocity ordering mismatch")
       if capsule_names != capsule_layout_names:
         raise RuntimeError("Capsule force and layout ordering mismatch")
+      if capsule_names != contact_point_names:
+        raise RuntimeError("Capsule force and contact-point ordering mismatch")
       if capsule_layout_xy is None:
         capsule_layout_xy = capsule_layout.squeeze(0).detach().clone()
 
@@ -630,10 +639,27 @@ def run_silent_eval(
         foot_body_ids,
       )
       foot_grid_force = (
-        distribute_capsule_forces_to_foot_grid(
-          capsule_z_force_n=capsule_force,
-          capsule_fromto_xy_m=spec.foot_collision_fromto_xy_m,
-          capsule_radius_m=spec.foot_collision_radius_m,
+        distribute_contact_forces_to_foot_grid(
+          contact_force_n=contact_point_force.reshape(
+            contact_point_force.shape[0],
+            num_feet,
+            -1,
+          ),
+          contact_pos_local_xy_m=world_to_local_foot_points(
+            body_pos_w=robot.data.body_link_pos_w[:, foot_body_ids],
+            body_quat_w=robot.data.body_link_quat_w[:, foot_body_ids],
+            points_w=contact_point_pos.reshape(
+              contact_point_pos.shape[0],
+              num_feet,
+              -1,
+              3,
+            ),
+          )[..., :2],
+          contact_mask=contact_point_mask.reshape(
+            contact_point_mask.shape[0],
+            num_feet,
+            -1,
+          ),
           local_xy_m=foot_grid_local_xy,
         )
         if foot_grid_names and spec.foot_collision_fromto_xy_m

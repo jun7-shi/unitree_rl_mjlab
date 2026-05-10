@@ -123,3 +123,10 @@ def test_ensure_foot_grid_capsule_contact_sensor_appends_once():
 
   names = [sensor.name for sensor in cfg.scene.sensors]
   assert names.count("foot_capsule_ground_contact") == 1
+  assert names.count("foot_capsule_ground_contact_points") == 1
+  point_sensor = next(
+    sensor for sensor in cfg.scene.sensors if sensor.name == "foot_capsule_ground_contact_points"
+  )
+  assert point_sensor.reduce == "maxforce"
+  assert point_sensor.global_frame is True
+  assert {"found", "force", "pos", "normal", "tangent"}.issubset(point_sensor.fields)

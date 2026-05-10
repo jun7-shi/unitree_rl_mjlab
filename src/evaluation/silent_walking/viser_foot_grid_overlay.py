@@ -12,11 +12,13 @@ import viser
 from mjlab.sensor import ContactMatch, ContactSensorCfg
 from mjlab.viewer import ViserPlayViewer
 
-from .contact_backends import extract_capsule_contact_forces, extract_feet_contact_flags
+from .contact_backends import extract_capsule_contact_point_forces, extract_feet_contact_flags
 from .foot_grid import (
+  distribute_contact_forces_to_foot_grid,
   foot_grid_point_velocities,
   make_capsule_footprint_sample_offsets,
 )
+from .regional_contact import world_to_local_foot_points
 from .robots import get_foot_proxy_spec, get_robot_spec
 
 
@@ -40,25 +42,44 @@ def ensure_foot_grid_capsule_contact_sensor(env_cfg: Any, robot_name: str = "g1"
   """Attach the capsule contact sensor needed by the foot-grid force overlay."""
 
   spec = get_robot_spec(robot_name)
-  sensor_name = "foot_capsule_ground_contact"
   existing_sensors = env_cfg.scene.sensors or ()
-  if any(sensor.name == sensor_name for sensor in existing_sensors):
+  existing_names = {sensor.name for sensor in existing_sensors}
+  new_sensors: list[ContactSensorCfg] = []
+  if "foot_capsule_ground_contact" not in existing_names:
+    new_sensors.append(
+      ContactSensorCfg(
+        name="foot_capsule_ground_contact",
+        primary=ContactMatch(
+          mode="geom",
+          pattern=spec.foot_collision_geom_names,
+          entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force"),
+        reduce="netforce",
+        num_slots=1,
+        track_air_time=True,
+      )
+    )
+  if "foot_capsule_ground_contact_points" not in existing_names:
+    new_sensors.append(
+      ContactSensorCfg(
+        name="foot_capsule_ground_contact_points",
+        primary=ContactMatch(
+          mode="geom",
+          pattern=spec.foot_collision_geom_names,
+          entity="robot",
+        ),
+        secondary=ContactMatch(mode="body", pattern="terrain"),
+        fields=("found", "force", "pos", "normal", "tangent"),
+        reduce="maxforce",
+        num_slots=1,
+        global_frame=True,
+      )
+    )
+  if not new_sensors:
     return
-  env_cfg.scene.sensors = existing_sensors + (
-    ContactSensorCfg(
-      name=sensor_name,
-      primary=ContactMatch(
-        mode="geom",
-        pattern=spec.foot_collision_geom_names,
-        entity="robot",
-      ),
-      secondary=ContactMatch(mode="body", pattern="terrain"),
-      fields=("found", "force"),
-      reduce="netforce",
-      num_slots=1,
-      track_air_time=True,
-    ),
-  )
+  env_cfg.scene.sensors = existing_sensors + tuple(new_sensors)
 
 
 def signed_vz_values_to_rgb(values: np.ndarray, *, limit_m_s: float) -> np.ndarray:
@@ -241,7 +262,6 @@ class ViserFootGridOverlay:
     self._body_ids: list[int] | None = None
     self._local_offsets: torch.Tensor | None = None
     self._local_xy_np: np.ndarray | None = None
-    self._force_weights: np.ndarray | None = None
     self._rasterizer: FootGridOverlayRasterizer | None = None
     self._image_handle: viser.GuiImageHandle | None = None
     self._status_handle: viser.GuiMarkdownHandle | None = None
@@ -280,7 +300,7 @@ class ViserFootGridOverlay:
     if self._image_handle is None or self._rasterizer is None:
       return
     self._ensure_geometry()
-    assert self._local_offsets is not None and self._force_weights is not None
+    assert self._local_offsets is not None
     robot = self.env.scene["robot"]
     body_pos = robot.data.body_link_pos_w[:, self._body_ids]
     body_quat = robot.data.body_link_quat_w[:, self._body_ids]
@@ -294,12 +314,42 @@ class ViserFootGridOverlay:
       body_ang_vel_w=body_ang_vel,
       local_offsets_m=local_offsets,
     )
-    _, capsule_force, _ = extract_capsule_contact_forces(self.env, self.config.robot_name)
+    contact_names, contact_force, contact_mask, contact_pos = extract_capsule_contact_point_forces(
+      self.env,
+      self.config.robot_name,
+    )
+    if contact_names != self.spec.foot_collision_geom_names:
+      raise RuntimeError("Capsule contact-point ordering mismatch")
     foot_contact = extract_feet_contact_flags(self.env, self.config.robot_name)
+    num_feet = len(self.proxy.foot_names)
     env_idx = int(env_idx)
     signed_vz = grid_velocity[env_idx, :, :, 2].detach().cpu().numpy()
-    force_by_capsule = capsule_force[env_idx].detach().cpu().numpy().reshape(2, -1)
-    force_n = force_by_capsule @ self._force_weights
+    contact_force_by_foot = contact_force.reshape(
+      contact_force.shape[0],
+      num_feet,
+      -1,
+    )
+    contact_mask_by_foot = contact_mask.reshape(
+      contact_mask.shape[0],
+      num_feet,
+      -1,
+    )
+    contact_pos_local = world_to_local_foot_points(
+      body_pos_w=body_pos,
+      body_quat_w=body_quat,
+      points_w=contact_pos.reshape(
+        contact_pos.shape[0],
+        num_feet,
+        -1,
+        3,
+      ),
+    )
+    force_n = distribute_contact_forces_to_foot_grid(
+      contact_force_n=contact_force_by_foot,
+      contact_pos_local_xy_m=contact_pos_local[..., :2],
+      contact_mask=contact_mask_by_foot,
+      local_xy_m=local_offsets[:, :2],
+    )[env_idx].detach().cpu().numpy()
     contact = foot_contact[env_idx].detach().cpu().numpy().astype(bool)
     self._image_handle.image = self._rasterizer.render(
       signed_vz=signed_vz,
@@ -333,11 +383,6 @@ class ViserFootGridOverlay:
     )
     self._local_offsets = local_offsets
     self._local_xy_np = local_offsets[:, :2].cpu().numpy()
-    self._force_weights = _capsule_force_weights_np(
-      self.spec.foot_collision_fromto_xy_m[:7],
-      self.spec.foot_collision_radius_m[:7],
-      self._local_xy_np,
-    )
 
 
 class FootGridViserPlayViewer(ViserPlayViewer):
@@ -410,32 +455,3 @@ def _local_xy_to_human_view_pixels(
     py = np.full_like(local_x, padding + usable_height * 0.5, dtype=np.float32)
 
   return np.stack((np.rint(px), np.rint(py)), axis=1).astype(np.int32)
-
-
-def _capsule_force_weights_np(
-  capsule_fromto_xy_m: tuple[tuple[tuple[float, float], tuple[float, float]], ...],
-  capsule_radius_m: tuple[float, ...],
-  local_xy_m: np.ndarray,
-) -> np.ndarray:
-  weights = []
-  points = local_xy_m.astype(np.float32, copy=False)
-  for capsule_idx, fromto in enumerate(capsule_fromto_xy_m):
-    start = np.array(fromto[0], dtype=np.float32)
-    end = np.array(fromto[1], dtype=np.float32)
-    radius = max(float(capsule_radius_m[capsule_idx]), 1.0e-6)
-    distance = _distance_to_segment_np(points, start, end)
-    raw = np.clip(1.0 - distance / (2.0 * radius), 0.0, None)
-    if float(raw.sum()) <= 0.0:
-      raw = np.zeros_like(distance)
-      raw[int(np.argmin(distance))] = 1.0
-    weights.append(raw / max(float(raw.sum()), 1.0e-12))
-  return np.stack(weights, axis=0).astype(np.float32)
-
-
-def _distance_to_segment_np(points: np.ndarray, start: np.ndarray, end: np.ndarray) -> np.ndarray:
-  segment = end - start
-  length_sq = max(float(np.dot(segment, segment)), 1.0e-12)
-  t = np.sum((points - start) * segment[None, :], axis=1) / length_sq
-  t = np.clip(t, 0.0, 1.0)
-  projection = start[None, :] + t[:, None] * segment[None, :]
-  return np.linalg.norm(points - projection, axis=1)

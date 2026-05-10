@@ -189,6 +189,62 @@ def distribute_capsule_forces_to_foot_grid(
   return torch.einsum("tfc,cp->tfp", force_by_foot, weights)
 
 
+def distribute_contact_forces_to_foot_grid(
+  *,
+  contact_force_n: torch.Tensor,
+  contact_pos_local_xy_m: torch.Tensor,
+  contact_mask: torch.Tensor,
+  local_xy_m: torch.Tensor,
+  contact_radius_m: float = 0.018,
+) -> torch.Tensor:
+  """Distribute contact-point forces onto nearby virtual foot-grid points.
+
+  Unlike the capsule-level fallback, this only lights points near actual contact
+  positions. Contacts outside the cutoff are assigned to their nearest grid point
+  so the visual proxy does not silently drop measured contact force.
+  """
+
+  if contact_radius_m <= 0.0:
+    raise ValueError("contact_radius_m must be positive")
+  if contact_force_n.ndim != 3:
+    raise ValueError("contact_force_n must have shape [B, F, C]")
+  if contact_pos_local_xy_m.shape != contact_force_n.shape + (2,):
+    raise ValueError("contact_pos_local_xy_m must have shape [B, F, C, 2]")
+  if contact_mask.shape != contact_force_n.shape:
+    raise ValueError("contact_mask must have shape [B, F, C]")
+  if local_xy_m.ndim != 2 or local_xy_m.shape[-1] != 2:
+    raise ValueError("local_xy_m must have shape [P, 2]")
+
+  dtype = contact_force_n.dtype
+  device = contact_force_n.device
+  local_xy = local_xy_m.to(dtype=dtype, device=device)
+  contact_xy = contact_pos_local_xy_m.to(dtype=dtype, device=device)
+  mask = contact_mask.to(device=device).bool()
+  force = torch.where(
+    mask,
+    contact_force_n.clamp_min(0.0),
+    torch.zeros_like(contact_force_n),
+  )
+
+  distance = torch.linalg.norm(
+    local_xy.view(1, 1, 1, -1, 2) - contact_xy.unsqueeze(3),
+    dim=-1,
+  )
+  raw = torch.clamp(1.0 - distance / float(contact_radius_m), min=0.0)
+  raw = raw * mask.unsqueeze(-1).to(dtype=dtype)
+
+  raw_sum = raw.sum(dim=-1, keepdim=True)
+  active_without_support = mask.unsqueeze(-1) & (raw_sum <= torch.finfo(dtype).eps)
+  if bool(active_without_support.any().item()):
+    nearest = torch.argmin(distance, dim=-1, keepdim=True)
+    fallback = torch.zeros_like(raw).scatter_(-1, nearest, 1.0)
+    raw = torch.where(active_without_support, fallback, raw)
+    raw_sum = raw.sum(dim=-1, keepdim=True)
+
+  weights = raw / raw_sum.clamp_min(torch.finfo(dtype).eps)
+  return (force.unsqueeze(-1) * weights).sum(dim=2)
+
+
 def summarize_post_contact_foot_grid(
   trace: EpisodeMetricTrace,
   *,

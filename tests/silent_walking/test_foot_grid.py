@@ -4,6 +4,7 @@ from matplotlib import colors
 
 from src.evaluation.silent_walking.foot_grid import (
   distribute_capsule_forces_to_foot_grid,
+  distribute_contact_forces_to_foot_grid,
   foot_grid_down_speed_frames,
   foot_grid_point_velocities,
   make_capsule_footprint_sample_offsets,
@@ -201,6 +202,33 @@ def test_distribute_capsule_forces_to_foot_grid_conserves_force_near_segments():
   assert torch.allclose(point_force[0, 0], torch.tensor([10.0, 20.0]))
   assert torch.allclose(point_force[0, 1], torch.tensor([30.0, 40.0]))
   assert torch.allclose(point_force.sum(dim=2), capsule_force.reshape(1, 2, 2).sum(dim=2))
+
+
+def test_distribute_contact_forces_to_foot_grid_only_lights_contact_points():
+  contact_force = torch.tensor([[[12.0]]])
+  contact_pos_local_xy = torch.tensor([[[[0.0, 0.0]]]])
+  contact_mask = torch.tensor([[[True]]])
+  local_xy = torch.tensor([[0.0, 0.0], [0.04, 0.0], [0.0, 0.04]])
+
+  point_force = distribute_contact_forces_to_foot_grid(
+    contact_force_n=contact_force,
+    contact_pos_local_xy_m=contact_pos_local_xy,
+    contact_mask=contact_mask,
+    local_xy_m=local_xy,
+    contact_radius_m=0.02,
+  )
+
+  assert point_force.shape == (1, 1, 3)
+  assert torch.allclose(point_force[0, 0], torch.tensor([12.0, 0.0, 0.0]))
+
+  no_contact_force = distribute_contact_forces_to_foot_grid(
+    contact_force_n=contact_force,
+    contact_pos_local_xy_m=contact_pos_local_xy,
+    contact_mask=torch.tensor([[[False]]]),
+    local_xy_m=local_xy,
+    contact_radius_m=0.02,
+  )
+  assert torch.equal(no_contact_force, torch.zeros_like(no_contact_force))
 
 
 def test_summarize_post_contact_foot_grid_uses_touchdown_edges_and_post_steps():
