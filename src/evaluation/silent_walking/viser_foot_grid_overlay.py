@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import time
 import traceback
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 
 import numpy as np
 import torch
@@ -92,6 +92,22 @@ def ensure_foot_grid_capsule_contact_sensor(
   if not new_sensors:
     return
   env_cfg.scene.sensors = existing_sensors + tuple(new_sensors)
+
+
+def prepare_silent_foot_grid_overlay_env_cfg(
+  env_cfg: Any,
+  robot_name: str = "g1",
+  *,
+  force_slots: int = 4,
+) -> Any:
+  """Add the sensors required by the silent foot-grid overlay and return env_cfg."""
+
+  ensure_foot_grid_capsule_contact_sensor(
+    env_cfg,
+    robot_name,
+    force_slots=force_slots,
+  )
+  return env_cfg
 
 
 def signed_vz_values_to_rgb(values: np.ndarray, *, limit_m_s: float) -> np.ndarray:
@@ -461,6 +477,83 @@ class ViserFootGridOverlay:
     self._local_xy_np = local_offsets[:, :2].cpu().numpy()
 
 
+class SilentFootGridOverlayEnvWrapper:
+  """Delegate env access while carrying a reusable silent foot-grid overlay runtime."""
+
+  def __init__(
+    self,
+    env: Any,
+    config: FootGridOverlayConfig,
+    *,
+    overlay_factory: Callable[
+      [Any, FootGridOverlayConfig],
+      ViserFootGridOverlay,
+    ] = ViserFootGridOverlay,
+  ) -> None:
+    self.env = env
+    self.silent_foot_grid_config = config
+    self.silent_foot_grid_overlay = overlay_factory(self.unwrapped, config)
+
+  @property
+  def unwrapped(self) -> Any:
+    return getattr(self.env, "unwrapped", self.env)
+
+  def setup_silent_foot_grid_overlay(self, server: viser.ViserServer) -> None:
+    """Create the Viser GUI elements for this wrapper's foot-grid overlay."""
+
+    self.silent_foot_grid_overlay.setup(server)
+
+  def update_silent_foot_grid_overlay(
+    self,
+    env_idx: int,
+    step_count: int,
+    *,
+    substep_index: int | None = None,
+    substep_count: int | None = None,
+  ) -> None:
+    """Push one foot-grid overlay update from the wrapped env state."""
+
+    self.silent_foot_grid_overlay.update(
+      env_idx,
+      step_count,
+      substep_index=substep_index,
+      substep_count=substep_count,
+    )
+
+  def step(self, actions: Any) -> Any:
+    """Delegate stepping to the wrapped env."""
+
+    return self.env.step(actions)
+
+  def get_observations(self) -> Any:
+    """Delegate observation retrieval to the wrapped env."""
+
+    return self.env.get_observations()
+
+  def __getattr__(self, name: str) -> Any:
+    return getattr(self.env, name)
+
+
+def wrap_env_for_silent_foot_grid_overlay(
+  env: Any,
+  config: FootGridOverlayConfig | None = None,
+  *,
+  overlay_factory: Callable[
+    [Any, FootGridOverlayConfig],
+    ViserFootGridOverlay,
+  ] = ViserFootGridOverlay,
+) -> SilentFootGridOverlayEnvWrapper:
+  """Return an env wrapper carrying the silent foot-grid overlay runtime."""
+
+  if isinstance(env, SilentFootGridOverlayEnvWrapper):
+    return env
+  return SilentFootGridOverlayEnvWrapper(
+    env,
+    config or FootGridOverlayConfig(),
+    overlay_factory=overlay_factory,
+  )
+
+
 class FootGridViserPlayViewer(ViserPlayViewer):
   """Viser play viewer that can update foot-grid GUI images per control or sim step."""
 
@@ -469,17 +562,21 @@ class FootGridViserPlayViewer(ViserPlayViewer):
     env: Any,
     policy: Any,
     *,
-    foot_grid_config: FootGridOverlayConfig,
+    foot_grid_config: FootGridOverlayConfig | None = None,
   ) -> None:
-    super().__init__(env, policy)
-    self._foot_grid_overlay = ViserFootGridOverlay(env.unwrapped, foot_grid_config)
-    self._foot_grid_update_rate = foot_grid_config.update_rate
+    foot_grid_env = wrap_env_for_silent_foot_grid_overlay(
+      env,
+      foot_grid_config or FootGridOverlayConfig(),
+    )
+    super().__init__(foot_grid_env, policy)
+    self._foot_grid_env = foot_grid_env
+    self._foot_grid_update_rate = foot_grid_env.silent_foot_grid_config.update_rate
     self._foot_grid_action_pending = False
     self._foot_grid_substep_index = 0
 
   def setup(self) -> None:
     super().setup()
-    self._foot_grid_overlay.setup(self._server)
+    self._foot_grid_env.setup_silent_foot_grid_overlay(self._server)
 
   def _step_physics(self, dt: float) -> None:
     if self._foot_grid_update_rate != "sim":
@@ -515,14 +612,20 @@ class FootGridViserPlayViewer(ViserPlayViewer):
 
     ok = super()._execute_step()
     if ok:
-      self._foot_grid_overlay.update(self._scene.env_idx, self._step_count)
+      self._foot_grid_env.update_silent_foot_grid_overlay(
+        self._scene.env_idx,
+        self._step_count,
+      )
     return ok
 
   def reset_environment(self) -> None:
     super().reset_environment()
     self._foot_grid_action_pending = False
     self._foot_grid_substep_index = 0
-    self._foot_grid_overlay.update(self._scene.env_idx, self._step_count)
+    self._foot_grid_env.update_silent_foot_grid_overlay(
+      self._scene.env_idx,
+      self._step_count,
+    )
 
   def _execute_sim_substep(self) -> bool:
     try:
@@ -561,7 +664,7 @@ class FootGridViserPlayViewer(ViserPlayViewer):
 
     self._foot_grid_substep_index += 1
     decimation = int(env.cfg.decimation)
-    self._foot_grid_overlay.update(
+    self._foot_grid_env.update_silent_foot_grid_overlay(
       self._scene.env_idx,
       self._step_count + 1,
       substep_index=self._foot_grid_substep_index,

@@ -6,6 +6,10 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Literal
 
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(REPO_ROOT))
+
 import torch
 import tyro
 
@@ -20,7 +24,8 @@ from mjlab.viewer import NativeMujocoViewer, ViserPlayViewer
 from src.evaluation.silent_walking.viser_foot_grid_overlay import (
   FootGridOverlayConfig,
   FootGridViserPlayViewer,
-  ensure_foot_grid_capsule_contact_sensor,
+  prepare_silent_foot_grid_overlay_env_cfg,
+  wrap_env_for_silent_foot_grid_overlay,
 )
 
 
@@ -161,7 +166,7 @@ def run_play(task_id: str, cfg: PlayConfig):
   if cfg.foot_grid_overlay:
     if "g1" not in task_id.lower():
       raise ValueError("--foot-grid-overlay is currently wired only for G1 tasks")
-    ensure_foot_grid_capsule_contact_sensor(
+    prepare_silent_foot_grid_overlay_env_cfg(
       env_cfg,
       "g1",
       force_slots=cfg.foot_grid_overlay_force_slots,
@@ -190,6 +195,14 @@ def run_play(task_id: str, cfg: PlayConfig):
     )
 
   env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+  foot_grid_config: FootGridOverlayConfig | None = None
+  if cfg.foot_grid_overlay:
+    foot_grid_config = FootGridOverlayConfig(
+      robot_name="g1",
+      point_count=cfg.foot_grid_overlay_points,
+      update_rate=cfg.foot_grid_overlay_update_rate,
+      force_slots=cfg.foot_grid_overlay_force_slots,
+    )
   if DUMMY_MODE:
     action_shape: tuple[int, ...] = env.unwrapped.action_space.shape
     if cfg.agent == "zero":
@@ -229,6 +242,9 @@ def run_play(task_id: str, cfg: PlayConfig):
     resolved_viewer = cfg.viewer
   if cfg.foot_grid_overlay and resolved_viewer != "viser":
     raise ValueError("--foot-grid-overlay requires --viewer viser")
+  if cfg.foot_grid_overlay:
+    assert foot_grid_config is not None
+    env = wrap_env_for_silent_foot_grid_overlay(env, foot_grid_config)
 
   if resolved_viewer == "native":
     if cfg.quiet_overlay:
@@ -243,16 +259,8 @@ def run_play(task_id: str, cfg: PlayConfig):
 
       QuietViserPlayViewer(env, policy, robot_name=cfg.quiet_robot).run()
     elif cfg.foot_grid_overlay:
-      FootGridViserPlayViewer(
-        env,
-        policy,
-        foot_grid_config=FootGridOverlayConfig(
-          robot_name="g1",
-          point_count=cfg.foot_grid_overlay_points,
-          update_rate=cfg.foot_grid_overlay_update_rate,
-          force_slots=cfg.foot_grid_overlay_force_slots,
-        ),
-      ).run()
+      assert foot_grid_config is not None
+      FootGridViserPlayViewer(env, policy, foot_grid_config=foot_grid_config).run()
     else:
       ViserPlayViewer(env, policy).run()
   else:

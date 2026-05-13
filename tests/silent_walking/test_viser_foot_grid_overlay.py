@@ -4,9 +4,13 @@ import numpy as np
 
 from src.evaluation.silent_walking.viser_foot_grid_overlay import (
   FootGridOverlayRasterizer,
+  FootGridOverlayConfig,
   FootGridViserPlayViewer,
+  SilentFootGridOverlayEnvWrapper,
   ensure_foot_grid_capsule_contact_sensor,
+  prepare_silent_foot_grid_overlay_env_cfg,
   pressure_values_to_rgb,
+  wrap_env_for_silent_foot_grid_overlay,
 )
 
 
@@ -154,6 +158,80 @@ def test_ensure_foot_grid_capsule_contact_sensor_appends_once():
   assert point_sensor.global_frame is True
   assert point_sensor.num_slots == 4
   assert {"found", "force", "pos", "normal", "tangent"}.issubset(point_sensor.fields)
+
+
+def test_prepare_silent_foot_grid_overlay_env_cfg_returns_cfg_and_appends_sensors():
+  @dataclass
+  class FakeScene:
+    sensors: tuple[object, ...] = ()
+
+  @dataclass
+  class FakeCfg:
+    scene: FakeScene
+
+  cfg = FakeCfg(scene=FakeScene())
+
+  returned = prepare_silent_foot_grid_overlay_env_cfg(cfg, "g1", force_slots=2)
+
+  assert returned is cfg
+  names = [sensor.name for sensor in cfg.scene.sensors]
+  assert names == ["foot_capsule_ground_contact", "foot_capsule_ground_contact_points"]
+  assert cfg.scene.sensors[-1].num_slots == 2
+
+
+def test_silent_foot_grid_overlay_env_wrapper_delegates_env_and_overlay_calls():
+  class FakeOverlay:
+    def __init__(self, env, config):
+      self.env = env
+      self.config = config
+      self.setup_calls = []
+      self.update_calls = []
+
+    def setup(self, server):
+      self.setup_calls.append(server)
+
+    def update(self, env_idx, step_count, *, substep_index=None, substep_count=None):
+      self.update_calls.append((env_idx, step_count, substep_index, substep_count))
+
+  class FakeEnv:
+    def __init__(self):
+      self.unwrapped = object()
+      self.step_calls = []
+      self.cfg = object()
+
+    def step(self, action):
+      self.step_calls.append(action)
+      return "step-result"
+
+    def get_observations(self):
+      return "obs"
+
+  env = FakeEnv()
+  config = FootGridOverlayConfig(point_count=4)
+
+  wrapper = wrap_env_for_silent_foot_grid_overlay(
+    env,
+    config,
+    overlay_factory=FakeOverlay,
+  )
+
+  assert isinstance(wrapper, SilentFootGridOverlayEnvWrapper)
+  assert wrapper.unwrapped is env.unwrapped
+  assert wrapper.cfg is env.cfg
+  assert wrapper.get_observations() == "obs"
+  assert wrapper.step("action") == "step-result"
+  assert env.step_calls == ["action"]
+
+  wrapper.setup_silent_foot_grid_overlay("server")
+  wrapper.update_silent_foot_grid_overlay(
+    1,
+    2,
+    substep_index=3,
+    substep_count=4,
+  )
+
+  assert wrapper.silent_foot_grid_overlay.setup_calls == ["server"]
+  assert wrapper.silent_foot_grid_overlay.update_calls == [(1, 2, 3, 4)]
 
 
 def test_foot_grid_sim_update_rate_steps_by_physics_dt():
