@@ -27,6 +27,7 @@ class PreviewConfig:
   loop: bool = True
   apply_orientation_offsets: bool = True
   align_upper_arm_axes_to_g1: bool = True
+  apply_lower_body_offsets: bool = True
   remove_initial_heading: bool = True
 
 
@@ -52,6 +53,7 @@ def run_preview(config: PreviewConfig) -> PreviewSummary:
     frame_slice=frame_slice,
     apply_orientation_offsets=config.apply_orientation_offsets,
     align_upper_arm_axes_to_g1=config.align_upper_arm_axes_to_g1,
+    apply_lower_body_offsets=config.apply_lower_body_offsets,
     remove_initial_heading=config.remove_initial_heading,
   )
   retargeter = G1FullBodySEWRetargeter()
@@ -133,6 +135,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     help="Use raw BVH upper-arm segment directions instead of flipping them to match G1 shoulder axes.",
   )
   parser.add_argument(
+    "--raw-lower-body-offsets",
+    action="store_true",
+    help="Use raw BVH leg keypoints instead of soma-retargeter SOMA-to-G1 lower-body scaler offsets.",
+  )
+  parser.add_argument(
     "--keep-global-heading",
     action="store_true",
     help="Keep the BVH global heading instead of removing the first frame's heading for fixed-base preview.",
@@ -152,6 +159,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       loop=not args.once,
       apply_orientation_offsets=not args.raw_orientations,
       align_upper_arm_axes_to_g1=not args.raw_upper_arm_axes,
+      apply_lower_body_offsets=not args.raw_lower_body_offsets,
       remove_initial_heading=not args.keep_global_heading,
     )
   )

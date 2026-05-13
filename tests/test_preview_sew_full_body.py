@@ -17,6 +17,7 @@ def test_run_full_body_preview_headless_retargets_bvh_and_reports_errors(tmp_pat
       bvh_path=bvh_path,
       max_frames=1,
       no_viewer=True,
+      apply_lower_body_offsets=False,
     )
   )
 
@@ -40,6 +41,7 @@ def test_full_body_preview_script_runs_directly_from_repo_root(tmp_path):
       "--max-frames",
       "1",
       "--no-viewer",
+      "--raw-lower-body-offsets",
     ],
     cwd=Path(__file__).resolve().parents[1],
     check=False,
@@ -60,11 +62,13 @@ def test_run_full_body_preview_uses_full_body_loader_defaults(monkeypatch, tmp_p
     frame_slice,
     apply_orientation_offsets,
     align_upper_arm_axes_to_g1,
+    apply_lower_body_offsets,
     remove_initial_heading,
   ):
     captured["frame_slice"] = frame_slice
     captured["apply_orientation_offsets"] = apply_orientation_offsets
     captured["align_upper_arm_axes_to_g1"] = align_upper_arm_axes_to_g1
+    captured["apply_lower_body_offsets"] = apply_lower_body_offsets
     captured["remove_initial_heading"] = remove_initial_heading
     return [object()]
 
@@ -92,4 +96,5 @@ def test_run_full_body_preview_uses_full_body_loader_defaults(monkeypatch, tmp_p
   assert captured["frame_slice"] == slice(10, 15)
   assert captured["apply_orientation_offsets"] is True
   assert captured["align_upper_arm_axes_to_g1"] is True
+  assert captured["apply_lower_body_offsets"] is True
   assert captured["remove_initial_heading"] is True
