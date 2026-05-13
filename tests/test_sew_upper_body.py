@@ -1,6 +1,36 @@
-import numpy as np
+from pathlib import Path
 
+import numpy as np
+import pytest
+
+from src.motion.bvh_full_body import load_soma_bvh_full_body_targets
+from src.motion.sew_full_body import G1FullBodySEWRetargeter, retarget_full_body_targets
 from src.motion.sew_upper_body import G1UpperBodySEWRetargeter, retarget_upper_body_targets
+
+
+def test_full_body_retargeting_avoids_right_elbow_branch_jitter_on_bvh_clip():
+  bvh_path = (
+    Path("/data/jun7.shi/datasets/bones-seed/soma_uniform/bvh/230413")
+    / "dance_vouge_dancehall_open_close_boogle_180_R_fast_002__A320_M.bvh"
+  )
+  if not bvh_path.exists():
+    pytest.skip("local bones-seed A320 fixture is not available")
+  targets = load_soma_bvh_full_body_targets(
+    bvh_path,
+    frame_slice=slice(0, 10),
+    apply_orientation_offsets=True,
+    align_upper_arm_axes_to_g1=True,
+    apply_lower_body_offsets=True,
+    remove_initial_heading=True,
+  )
+
+  results = retarget_full_body_targets(targets, retargeter=G1FullBodySEWRetargeter())
+  q_deg = np.rad2deg(np.asarray([result.joint_angles for result in results], dtype=float))
+  right_shoulder_yaw = q_deg[:, 24]
+  right_elbow = q_deg[:, 25]
+
+  assert np.max(np.abs(np.diff(right_shoulder_yaw))) <= 1.0
+  assert np.max(np.abs(np.diff(right_elbow))) <= 1.0
 
 
 def test_g1_upper_body_retargeter_recovers_reachable_upper_body_pose():

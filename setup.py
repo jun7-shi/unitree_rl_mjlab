@@ -8,10 +8,18 @@ INSTALL_REQUIRES = [
     "mujoco-warp==3.5.0",
 ]
 
+EXTRAS_REQUIRE = {
+    "webcam": [
+        "opencv-python",
+        "mediapipe",
+    ],
+}
+
 # Installation operation
 setup(
     name="unitree_rl_mjlab",
     packages=["src"],
     version="0.0.1",
     install_requires=INSTALL_REQUIRES,
+    extras_require=EXTRAS_REQUIRE,
 )

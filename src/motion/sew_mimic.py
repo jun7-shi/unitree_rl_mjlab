@@ -56,6 +56,17 @@ def orientation_error(lhs: ArrayLike3, rhs: ArrayLike3) -> float:
   return 0.5 - 0.5 * cosine
 
 
+def candidate_sort_key(
+  *,
+  axis_error: float,
+  joint_distance: float,
+  error_tolerance: float = 1e-9,
+) -> tuple[float, float]:
+  """Rank closed-form candidates while ignoring numerical error ties."""
+  comparable_error = 0.0 if abs(float(axis_error)) <= error_tolerance else float(axis_error)
+  return comparable_error, float(joint_distance)
+
+
 def rotation_vector_from_matrix(rotation: np.ndarray, eps: float = 1e-12) -> np.ndarray:
   """Return the SO(3) logarithm as a rotation vector."""
   matrix = np.asarray(rotation, dtype=float).reshape(3, 3)
@@ -337,9 +348,9 @@ class G1SEWMimicRetargeter:
         candidate_q = q.copy()
         candidate_q[indexes] = values
         self._set_arm_joint_angles(candidate_q)
-        score = (
-          orientation_error(self.data.xaxis[joint_id], target_axis),
-          float(np.linalg.norm(candidate_q[indexes] - q[indexes])),
+        score = candidate_sort_key(
+          axis_error=orientation_error(self.data.xaxis[joint_id], target_axis),
+          joint_distance=float(np.linalg.norm(candidate_q[indexes] - q[indexes])),
         )
         if best_score is None or score < best_score:
           best_score = score

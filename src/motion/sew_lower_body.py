@@ -9,6 +9,7 @@ import numpy as np
 
 from src import SRC_PATH
 from src.motion.sew_mimic import (
+  candidate_sort_key,
   matrix_orientation_error,
   normalize,
   orientation_error,
@@ -242,9 +243,10 @@ class G1LowerBodySEWRetargeter:
   ) -> np.ndarray:
     def score(candidate_q: np.ndarray) -> tuple[float, float]:
       self._set_lower_body_joint_angles(candidate_q)
-      error = orientation_error(self._current_leg_segment_axis(side, segment), target_segment_axis)
-      distance = float(np.linalg.norm(candidate_q[indexes] - q[indexes]))
-      return error, distance
+      return candidate_sort_key(
+        axis_error=orientation_error(self._current_leg_segment_axis(side, segment), target_segment_axis),
+        joint_distance=float(np.linalg.norm(candidate_q[indexes] - q[indexes])),
+      )
 
     return self._select_candidate(q, indexes, candidates, score)
 
@@ -270,7 +272,10 @@ class G1LowerBodySEWRetargeter:
       for bounded_angle in self._bounded_equivalent_angles(angle, joint_index):
         candidate_q = q.copy()
         candidate_q[joint_index] = bounded_angle
-        candidate_score = (float(score(candidate_q)), abs(float(bounded_angle - q[joint_index])))
+        candidate_score = candidate_sort_key(
+          axis_error=float(score(candidate_q)),
+          joint_distance=abs(float(bounded_angle - q[joint_index])),
+        )
         if best_score is None or candidate_score < best_score:
           best_score = candidate_score
           best_angle = bounded_angle

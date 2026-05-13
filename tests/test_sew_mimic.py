@@ -5,6 +5,7 @@ import pytest
 
 from src.motion.sew_mimic import (
   G1SEWMimicRetargeter,
+  candidate_sort_key,
   normalize,
   retarget_motion_rows_from_targets,
   rotation_about_axis,
@@ -71,6 +72,13 @@ def test_solve_two_axis_rotation_matches_paper_subproblem2_composition():
     ) <= 1e-8
     for first, second in candidates
   )
+
+
+def test_candidate_sort_key_prefers_continuity_for_numerical_error_ties():
+  discontinuous_exact = candidate_sort_key(axis_error=0.0, joint_distance=3.0)
+  continuous_tiny_error = candidate_sort_key(axis_error=5e-17, joint_distance=0.01)
+
+  assert continuous_tiny_error < discontinuous_exact
 
 
 def test_g1_retargeter_recovers_targets_generated_from_reachable_pose():

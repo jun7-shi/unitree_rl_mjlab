@@ -53,6 +53,23 @@ def test_full_body_preview_script_runs_directly_from_repo_root(tmp_path):
   assert "frames: 1" in result.stdout
 
 
+def test_webcam_preview_script_help_does_not_require_webcam_dependencies():
+  result = subprocess.run(
+    [
+      sys.executable,
+      "scripts/preview_webcam_sew_full_body.py",
+      "--help",
+    ],
+    cwd=Path(__file__).resolve().parents[1],
+    check=False,
+    capture_output=True,
+    text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert "Retarget a live webcam human pose" in result.stdout
+
+
 def test_run_full_body_preview_uses_full_body_loader_defaults(monkeypatch, tmp_path):
   captured = {}
 

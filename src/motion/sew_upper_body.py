@@ -11,6 +11,7 @@ from scipy.optimize import least_squares
 from src import SRC_PATH
 from src.motion.sew_mimic import (
   ArmKeypointTarget,
+  candidate_sort_key,
   matrix_orientation_error,
   normalize,
   orientation_error,
@@ -240,9 +241,9 @@ class G1UpperBodySEWRetargeter:
         candidate_q = q.copy()
         candidate_q[indexes] = values
         self._set_upper_body_joint_angles(candidate_q)
-        score = (
-          orientation_error(self.data.xaxis[joint_id], target_axis),
-          float(np.linalg.norm(candidate_q[indexes] - q[indexes])),
+        score = candidate_sort_key(
+          axis_error=orientation_error(self.data.xaxis[joint_id], target_axis),
+          joint_distance=float(np.linalg.norm(candidate_q[indexes] - q[indexes])),
         )
         if best_score is None or score < best_score:
           best_score = score
