@@ -6,14 +6,14 @@ from typing import Sequence
 
 import mujoco
 import numpy as np
-from scipy.optimize import least_squares
 
 from src import SRC_PATH
 from src.motion.sew_mimic import (
   matrix_orientation_error,
   normalize,
   orientation_error,
-  rotation_vector_from_matrix,
+  solve_two_axis_rotation,
+  subproblem1,
 )
 
 
@@ -81,6 +81,14 @@ class G1LowerBodySEWRetargeter:
         "ankle": self._named_id(mujoco.mjtObj.mjOBJ_JOINT, "right_ankle_pitch_joint"),
       },
     }
+    self._axis_joint_ids = {
+      "left": {
+        "thigh": self._named_id(mujoco.mjtObj.mjOBJ_JOINT, "left_hip_yaw_joint"),
+      },
+      "right": {
+        "thigh": self._named_id(mujoco.mjtObj.mjOBJ_JOINT, "right_hip_yaw_joint"),
+      },
+    }
     self._foot_site_ids = {
       "left": self._named_id(mujoco.mjtObj.mjOBJ_SITE, "left_foot"),
       "right": self._named_id(mujoco.mjtObj.mjOBJ_SITE, "right_foot"),
@@ -133,39 +141,201 @@ class G1LowerBodySEWRetargeter:
     start_index: int,
     target: LegKeypointTarget,
   ) -> np.ndarray:
-    indexes = np.arange(start_index, start_index + 6)
-    bounds = (self.joint_limits[indexes, 0], self.joint_limits[indexes, 1])
     thigh = normalize(target.knee - target.hip)
     shank = normalize(target.ankle - target.knee)
-    foot = np.asarray(target.foot_orientation, dtype=float).reshape(3, 3)
+    q = self._solve_segment_group(
+      q,
+      slice(start_index, start_index + 2),
+      side,
+      "thigh",
+      thigh,
+    )
+    q = self._solve_segment_group(
+      q,
+      slice(start_index + 2, start_index + 4),
+      side,
+      "shank",
+      shank,
+    )
+    return self._solve_foot_pointing_group(
+      q,
+      slice(start_index + 4, start_index + 6),
+      self._foot_site_ids[side],
+      target.foot_orientation,
+    )
 
-    def residual(values: np.ndarray) -> np.ndarray:
-      candidate = q.copy()
-      candidate[indexes] = values
-      self._set_lower_body_joint_angles(candidate)
-      current_thigh = self._current_leg_segment_axis(side, "thigh")
-      current_shank = self._current_leg_segment_axis(side, "shank")
-      current_foot = self.data.site_xmat[self._foot_site_ids[side]].reshape(3, 3)
-      return np.concatenate(
-        [
-          current_thigh - thigh,
-          current_shank - shank,
-          self.foot_orientation_weight * rotation_vector_from_matrix(foot @ current_foot.T),
-        ]
-      )
+  def _solve_segment_group(
+    self,
+    q: np.ndarray,
+    group: slice,
+    side: str,
+    segment: str,
+    target_segment_axis: np.ndarray,
+  ) -> np.ndarray:
+    indexes = np.arange(group.start or 0, group.stop or len(q))
+    base = q.copy()
+    base[indexes] = 0.0
+    self._set_lower_body_joint_angles(base)
+    first_axis = normalize(self.data.xaxis[self.controlled_joint_ids[indexes[0]]])
+    second_axis = normalize(self.data.xaxis[self.controlled_joint_ids[indexes[1]]])
+    initial_axis = self._current_leg_segment_axis(side, segment)
+    candidates = solve_two_axis_rotation(
+      initial_axis,
+      target_segment_axis,
+      first_axis,
+      second_axis,
+    )
+    return self._select_segment_group_candidate(q, indexes, candidates, side, segment, target_segment_axis)
 
-    result = least_squares(
-      residual,
-      q[indexes],
-      bounds=bounds,
-      xtol=1e-11,
-      ftol=1e-11,
-      gtol=1e-11,
-      max_nfev=800,
+  def _solve_foot_pointing_group(
+    self,
+    q: np.ndarray,
+    group: slice,
+    foot_site_id: int,
+    desired_foot_orientation: np.ndarray,
+  ) -> np.ndarray:
+    indexes = np.arange(group.start or 0, group.stop or len(q))
+    desired = np.asarray(desired_foot_orientation, dtype=float).reshape(3, 3)
+    base = q.copy()
+    base[indexes] = 0.0
+    self._set_lower_body_joint_angles(base)
+    pitch_axis = normalize(self.data.xaxis[self.controlled_joint_ids[indexes[0]]])
+    initial_x_axis = normalize(self.data.site_xmat[foot_site_id].reshape(3, 3)[:, 0])
+    pitch = self._select_single_axis_angle(
+      q,
+      indexes[0],
+      self._single_axis_candidates(initial_x_axis, desired[:, 0], pitch_axis),
+      lambda candidate_q: orientation_error(
+        self._site_axis_after_setting(candidate_q, foot_site_id, 0),
+        desired[:, 0],
+      ),
+    )
+
+    pitched = q.copy()
+    pitched[indexes[0]] = pitch
+    pitched[indexes[1]] = 0.0
+    self._set_lower_body_joint_angles(pitched)
+    roll_axis = normalize(self.data.xaxis[self.controlled_joint_ids[indexes[1]]])
+    initial_y_axis = normalize(self.data.site_xmat[foot_site_id].reshape(3, 3)[:, 1])
+    roll = self._select_single_axis_angle(
+      pitched,
+      indexes[1],
+      self._single_axis_candidates(initial_y_axis, desired[:, 1], roll_axis),
+      lambda candidate_q: orientation_error(
+        self._site_axis_after_setting(candidate_q, foot_site_id, 1),
+        desired[:, 1],
+      ),
     )
     solved = q.copy()
-    solved[indexes] = result.x
+    solved[indexes[0]] = pitch
+    solved[indexes[1]] = roll
     return np.clip(solved, self.joint_limits[:, 0], self.joint_limits[:, 1])
+
+  def _select_segment_group_candidate(
+    self,
+    q: np.ndarray,
+    indexes: np.ndarray,
+    candidates: list[tuple[float, float]],
+    side: str,
+    segment: str,
+    target_segment_axis: np.ndarray,
+  ) -> np.ndarray:
+    def score(candidate_q: np.ndarray) -> tuple[float, float]:
+      self._set_lower_body_joint_angles(candidate_q)
+      error = orientation_error(self._current_leg_segment_axis(side, segment), target_segment_axis)
+      distance = float(np.linalg.norm(candidate_q[indexes] - q[indexes]))
+      return error, distance
+
+    return self._select_candidate(q, indexes, candidates, score)
+
+  def _single_axis_candidates(
+    self,
+    initial_axis: np.ndarray,
+    target_axis: np.ndarray,
+    rotation_axis: np.ndarray,
+  ) -> list[float]:
+    angle = subproblem1(initial_axis, target_axis, rotation_axis)
+    return [angle]
+
+  def _select_single_axis_angle(
+    self,
+    q: np.ndarray,
+    joint_index: int,
+    candidates: list[float],
+    score,
+  ) -> float:
+    best_angle: float | None = None
+    best_score: tuple[float, float] | None = None
+    for angle in candidates:
+      for bounded_angle in self._bounded_equivalent_angles(angle, joint_index):
+        candidate_q = q.copy()
+        candidate_q[joint_index] = bounded_angle
+        candidate_score = (float(score(candidate_q)), abs(float(bounded_angle - q[joint_index])))
+        if best_score is None or candidate_score < best_score:
+          best_score = candidate_score
+          best_angle = bounded_angle
+    if best_angle is not None:
+      return best_angle
+    return float(np.clip(candidates[0] if candidates else q[joint_index], *self.joint_limits[joint_index]))
+
+  def _site_axis_after_setting(
+    self,
+    q: np.ndarray,
+    site_id: int,
+    axis_index: int,
+  ) -> np.ndarray:
+    self._set_lower_body_joint_angles(q)
+    return normalize(self.data.site_xmat[site_id].reshape(3, 3)[:, axis_index])
+
+  def _select_candidate(
+    self,
+    q: np.ndarray,
+    indexes: np.ndarray,
+    relative_candidates: list[tuple[float, float]],
+    score,
+  ) -> np.ndarray:
+    best_q: np.ndarray | None = None
+    best_score: tuple[float, float] | None = None
+    for first, second in relative_candidates:
+      for candidate_values in self._bounded_angle_pairs(indexes, first, second):
+        candidate_q = q.copy()
+        candidate_q[indexes] = candidate_values
+        candidate_score = score(candidate_q)
+        if best_score is None or candidate_score < best_score:
+          best_score = candidate_score
+          best_q = candidate_q
+    if best_q is not None:
+      return np.clip(best_q, self.joint_limits[:, 0], self.joint_limits[:, 1])
+
+    fallback = q.copy()
+    if relative_candidates:
+      fallback[indexes] = np.array(relative_candidates[0], dtype=float)
+    return np.clip(fallback, self.joint_limits[:, 0], self.joint_limits[:, 1])
+
+  def _bounded_angle_pairs(
+    self,
+    indexes: np.ndarray,
+    first: float,
+    second: float,
+  ) -> list[np.ndarray]:
+    first_values = self._bounded_equivalent_angles(first, indexes[0])
+    second_values = self._bounded_equivalent_angles(second, indexes[1])
+    return [
+      np.array([first_value, second_value], dtype=float)
+      for first_value in first_values
+      for second_value in second_values
+    ]
+
+  def _bounded_equivalent_angles(self, angle: float, joint_index: int) -> list[float]:
+    lower, upper = self.joint_limits[joint_index]
+    values = [
+      float(angle + 2.0 * np.pi * offset)
+      for offset in range(-2, 3)
+      if lower - 1e-9 <= angle + 2.0 * np.pi * offset <= upper + 1e-9
+    ]
+    if values:
+      return values
+    return []
 
   def _diagnostics(self, q: np.ndarray, target: LowerBodyTarget) -> dict[str, float]:
     self._set_lower_body_joint_angles(q)
@@ -186,17 +356,26 @@ class G1LowerBodySEWRetargeter:
 
   def _target_leg_from_current_configuration(self, side: str) -> LegKeypointTarget:
     ids = self._keypoint_joint_ids[side]
+    hip = self.data.xanchor[ids["hip"]].copy()
+    raw_knee = self.data.xanchor[ids["knee"]].copy()
+    raw_ankle = self.data.xanchor[ids["ankle"]].copy()
+    thigh_length = float(np.linalg.norm(raw_knee - hip))
+    shank_length = float(np.linalg.norm(raw_ankle - raw_knee))
+    thigh_axis = self._current_leg_segment_axis(side, "thigh")
+    shank_axis = normalize(raw_ankle - raw_knee)
+    knee = hip + thigh_length * thigh_axis
+    ankle = knee + shank_length * shank_axis
     return LegKeypointTarget(
-      hip=self.data.xanchor[ids["hip"]].copy(),
-      knee=self.data.xanchor[ids["knee"]].copy(),
-      ankle=self.data.xanchor[ids["ankle"]].copy(),
+      hip=hip,
+      knee=knee,
+      ankle=ankle,
       foot_orientation=self.data.site_xmat[self._foot_site_ids[side]].reshape(3, 3).copy(),
     )
 
   def _current_leg_segment_axis(self, side: str, segment: str) -> np.ndarray:
     ids = self._keypoint_joint_ids[side]
     if segment == "thigh":
-      return normalize(self.data.xanchor[ids["knee"]] - self.data.xanchor[ids["hip"]])
+      return -normalize(self.data.xaxis[self._axis_joint_ids[side]["thigh"]])
     if segment == "shank":
       return normalize(self.data.xanchor[ids["ankle"]] - self.data.xanchor[ids["knee"]])
     raise ValueError(f"Unknown leg segment: {segment}")

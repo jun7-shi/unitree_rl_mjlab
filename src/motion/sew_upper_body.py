@@ -15,6 +15,7 @@ from src.motion.sew_mimic import (
   normalize,
   orientation_error,
   rotation_vector_from_matrix,
+  solve_two_axis_rotation,
 )
 
 
@@ -210,27 +211,68 @@ class G1UpperBodySEWRetargeter:
     target_axis: np.ndarray,
   ) -> np.ndarray:
     indexes = np.arange(group.start or 0, group.stop or len(q))
-    bounds = (self.joint_limits[indexes, 0], self.joint_limits[indexes, 1])
-
-    def residual(values: np.ndarray) -> np.ndarray:
-      candidate = q.copy()
-      candidate[indexes] = values
-      self._set_upper_body_joint_angles(candidate)
-      current_axis = normalize(self.data.xaxis[joint_id])
-      return current_axis - target_axis
-
-    result = least_squares(
-      residual,
-      q[indexes],
-      bounds=bounds,
-      xtol=1e-11,
-      ftol=1e-11,
-      gtol=1e-11,
-      max_nfev=200,
+    base = q.copy()
+    base[indexes] = 0.0
+    self._set_upper_body_joint_angles(base)
+    first_axis = normalize(self.data.xaxis[self.controlled_joint_ids[indexes[0]]])
+    second_axis = normalize(self.data.xaxis[self.controlled_joint_ids[indexes[1]]])
+    initial_axis = normalize(self.data.xaxis[joint_id])
+    candidates = solve_two_axis_rotation(
+      initial_axis,
+      target_axis,
+      first_axis,
+      second_axis,
     )
-    solved = q.copy()
-    solved[indexes] = result.x
-    return np.clip(solved, self.joint_limits[:, 0], self.joint_limits[:, 1])
+    return self._select_axis_group_candidate(q, indexes, candidates, joint_id, target_axis)
+
+  def _select_axis_group_candidate(
+    self,
+    q: np.ndarray,
+    indexes: np.ndarray,
+    candidates: list[tuple[float, float]],
+    joint_id: int,
+    target_axis: np.ndarray,
+  ) -> np.ndarray:
+    best_q: np.ndarray | None = None
+    best_score: tuple[float, float] | None = None
+    for first, second in candidates:
+      for values in self._bounded_angle_pairs(indexes, first, second):
+        candidate_q = q.copy()
+        candidate_q[indexes] = values
+        self._set_upper_body_joint_angles(candidate_q)
+        score = (
+          orientation_error(self.data.xaxis[joint_id], target_axis),
+          float(np.linalg.norm(candidate_q[indexes] - q[indexes])),
+        )
+        if best_score is None or score < best_score:
+          best_score = score
+          best_q = candidate_q
+    if best_q is not None:
+      return np.clip(best_q, self.joint_limits[:, 0], self.joint_limits[:, 1])
+
+    fallback = q.copy()
+    if candidates:
+      fallback[indexes] = np.array(candidates[0], dtype=float)
+    return np.clip(fallback, self.joint_limits[:, 0], self.joint_limits[:, 1])
+
+  def _bounded_angle_pairs(
+    self,
+    indexes: np.ndarray,
+    first: float,
+    second: float,
+  ) -> list[np.ndarray]:
+    first_values = self._bounded_equivalent_angles(first, indexes[0])
+    second_values = self._bounded_equivalent_angles(second, indexes[1])
+    return [np.array([a, b], dtype=float) for a in first_values for b in second_values]
+
+  def _bounded_equivalent_angles(self, angle: float, joint_index: int) -> list[float]:
+    low, high = self.joint_limits[joint_index]
+    values: list[float] = []
+    for offset in (-2.0 * np.pi, 0.0, 2.0 * np.pi):
+      candidate = float(angle + offset)
+      if low - 1e-9 <= candidate <= high + 1e-9:
+        values.append(float(np.clip(candidate, low, high)))
+    return values
 
   def _solve_wrist_group(
     self,
