@@ -77,6 +77,7 @@ def test_webcam_dependency_loader_supports_mediapipe_without_top_level_solutions
   fake_cv2 = types.ModuleType("cv2")
   fake_mediapipe = types.ModuleType("mediapipe")
   fake_pose = types.ModuleType("mediapipe.python.solutions.pose")
+  fake_pose.POSE_CONNECTIONS = object()
   fake_drawing = types.ModuleType("mediapipe.python.solutions.drawing_utils")
   fake_viewer = types.ModuleType("mujoco.viewer")
   monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
@@ -87,10 +88,10 @@ def test_webcam_dependency_loader_supports_mediapipe_without_top_level_solutions
   monkeypatch.setitem(sys.modules, "mediapipe.python.solutions.drawing_utils", fake_drawing)
   monkeypatch.setitem(sys.modules, "mujoco.viewer", fake_viewer)
 
-  cv2, pose, drawing, viewer = webcam_preview._load_realtime_dependencies()
+  cv2, pose_factory, drawing, viewer = webcam_preview._load_realtime_dependencies()
 
   assert cv2 is fake_cv2
-  assert pose is fake_pose
+  assert pose_factory._mp_pose is fake_pose
   assert drawing is fake_drawing
   assert viewer is fake_viewer
 
@@ -101,6 +102,7 @@ def test_webcam_dependency_loader_supports_direct_mediapipe_solutions_import(mon
   fake_cv2 = types.ModuleType("cv2")
   fake_mediapipe = types.ModuleType("mediapipe")
   fake_pose = types.ModuleType("mediapipe.solutions.pose")
+  fake_pose.POSE_CONNECTIONS = object()
   fake_drawing = types.ModuleType("mediapipe.solutions.drawing_utils")
   fake_viewer = types.ModuleType("mujoco.viewer")
   monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
@@ -112,12 +114,82 @@ def test_webcam_dependency_loader_supports_direct_mediapipe_solutions_import(mon
   monkeypatch.setitem(sys.modules, "mediapipe.solutions.drawing_utils", fake_drawing)
   monkeypatch.setitem(sys.modules, "mujoco.viewer", fake_viewer)
 
-  cv2, pose, drawing, viewer = webcam_preview._load_realtime_dependencies()
+  cv2, pose_factory, drawing, viewer = webcam_preview._load_realtime_dependencies()
 
   assert cv2 is fake_cv2
-  assert pose is fake_pose
+  assert pose_factory._mp_pose is fake_pose
   assert drawing is fake_drawing
   assert viewer is fake_viewer
+
+
+def test_webcam_dependency_loader_supports_mediapipe_tasks_backend(monkeypatch, tmp_path):
+  import scripts.preview_webcam_sew_full_body as webcam_preview
+
+  fake_cv2 = types.ModuleType("cv2")
+  fake_mediapipe = types.ModuleType("mediapipe")
+  fake_mediapipe.__version__ = "0.10.35"
+  fake_mediapipe.__file__ = "fake-mediapipe"
+  fake_viewer = types.ModuleType("mujoco.viewer")
+  fake_mediapipe.tasks = SimpleNamespace(
+    BaseOptions=object,
+    vision=SimpleNamespace(
+      PoseLandmarker=object,
+    ),
+  )
+  model_path = tmp_path / "pose_landmarker_lite.task"
+  model_path.write_bytes(b"fake")
+  monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+  monkeypatch.setitem(sys.modules, "mediapipe", fake_mediapipe)
+  for module_name in (
+    "mediapipe.solutions",
+    "mediapipe.solutions.pose",
+    "mediapipe.solutions.drawing_utils",
+    "mediapipe.python",
+    "mediapipe.python.solutions",
+    "mediapipe.python.solutions.pose",
+    "mediapipe.python.solutions.drawing_utils",
+  ):
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+  monkeypatch.setitem(sys.modules, "mujoco.viewer", fake_viewer)
+
+  cv2, pose_factory, drawing, viewer = webcam_preview._load_realtime_dependencies(model_path)
+
+  assert cv2 is fake_cv2
+  assert pose_factory._pose_model == model_path
+  assert drawing is None
+  assert viewer is fake_viewer
+
+
+def test_webcam_dependency_loader_requires_pose_model_for_tasks_only_mediapipe(monkeypatch):
+  import scripts.preview_webcam_sew_full_body as webcam_preview
+
+  fake_cv2 = types.ModuleType("cv2")
+  fake_mediapipe = types.ModuleType("mediapipe")
+  fake_mediapipe.__version__ = "0.10.35"
+  fake_mediapipe.__file__ = "fake-mediapipe"
+  fake_mediapipe.tasks = SimpleNamespace()
+  fake_viewer = types.ModuleType("mujoco.viewer")
+  monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+  monkeypatch.setitem(sys.modules, "mediapipe", fake_mediapipe)
+  for module_name in (
+    "mediapipe.solutions",
+    "mediapipe.solutions.pose",
+    "mediapipe.solutions.drawing_utils",
+    "mediapipe.python",
+    "mediapipe.python.solutions",
+    "mediapipe.python.solutions.pose",
+    "mediapipe.python.solutions.drawing_utils",
+  ):
+    monkeypatch.delitem(sys.modules, module_name, raising=False)
+  monkeypatch.setitem(sys.modules, "mujoco.viewer", fake_viewer)
+
+  try:
+    webcam_preview._load_realtime_dependencies()
+  except RuntimeError as exc:
+    assert "--pose-model" in str(exc)
+    assert "pose_landmarker_lite.task" in str(exc)
+  else:
+    raise AssertionError("expected tasks-only mediapipe to require --pose-model")
 
 
 def test_run_full_body_preview_uses_full_body_loader_defaults(monkeypatch, tmp_path):

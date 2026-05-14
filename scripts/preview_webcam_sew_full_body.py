@@ -32,6 +32,7 @@ class WebcamPreviewConfig:
   min_tracking_confidence: float = 0.5
   smoothing_alpha: float = 0.35
   no_camera_window: bool = False
+  pose_model: Path | None = None
 
 
 def run_webcam_preview(config: WebcamPreviewConfig) -> None:
@@ -39,7 +40,7 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
     raise ValueError(f"width and height must be positive, got {config.width}x{config.height}")
   if config.fps <= 0.0:
     raise ValueError(f"fps must be positive, got {config.fps}")
-  cv2, mp_pose, mp_drawing, viewer_module = _load_realtime_dependencies()
+  cv2, pose_factory, mp_drawing, viewer_module = _load_realtime_dependencies(config.pose_model)
 
   capture = cv2.VideoCapture(config.camera)
   if not capture.isOpened():
@@ -53,9 +54,7 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
   q_previous = np.zeros(len(retargeter.controlled_joint_names), dtype=float)
   frame_dt = 1.0 / config.fps
 
-  with mp_pose.Pose(
-    model_complexity=1,
-    smooth_landmarks=True,
+  with pose_factory.create(
     min_detection_confidence=config.min_detection_confidence,
     min_tracking_confidence=config.min_tracking_confidence,
   ) as pose, viewer_module.launch_passive(retargeter.model, data) as viewer:
@@ -71,7 +70,8 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
-        pose_result = pose.process(rgb)
+        timestamp_ms = int(time.time() * 1000)
+        pose_result = pose_factory.process(pose, rgb, timestamp_ms)
         landmarks = _select_pose_landmarks(pose_result)
         if landmarks is not None:
           try:
@@ -93,7 +93,7 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
             q_previous = q_filtered
 
         if not config.no_camera_window:
-          _draw_camera_overlay(cv2, mp_pose, mp_drawing, frame, pose_result)
+          _draw_camera_overlay(cv2, pose_factory, mp_drawing, frame, pose_result)
           key = cv2.waitKey(1) & 0xFF
           if key in (27, ord("q")):
             break
@@ -108,24 +108,40 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
 
 
 def _select_pose_landmarks(pose_result):
-  if getattr(pose_result, "pose_world_landmarks", None) is not None:
-    return pose_result.pose_world_landmarks.landmark
-  if getattr(pose_result, "pose_landmarks", None) is not None:
-    return pose_result.pose_landmarks.landmark
+  world_landmarks = getattr(pose_result, "pose_world_landmarks", None)
+  if world_landmarks is not None:
+    return _first_landmark_list(world_landmarks)
+  image_landmarks = getattr(pose_result, "pose_landmarks", None)
+  if image_landmarks is not None:
+    return _first_landmark_list(image_landmarks)
   return None
 
 
-def _draw_camera_overlay(cv2, mp_pose, mp_drawing, frame, pose_result) -> None:
-  if getattr(pose_result, "pose_landmarks", None) is not None:
+def _first_landmark_list(landmarks):
+  if hasattr(landmarks, "landmark"):
+    return landmarks.landmark
+  if isinstance(landmarks, list) and landmarks:
+    first = landmarks[0]
+    return first.landmark if hasattr(first, "landmark") else first
+  return None
+
+
+def _draw_camera_overlay(cv2, pose_factory, mp_drawing, frame, pose_result) -> None:
+  landmarks = getattr(pose_result, "pose_landmarks", None)
+  if (
+    mp_drawing is not None
+    and pose_factory.connections is not None
+    and hasattr(landmarks, "landmark")
+  ):
     mp_drawing.draw_landmarks(
       frame,
-      pose_result.pose_landmarks,
-      mp_pose.POSE_CONNECTIONS,
+      landmarks,
+      pose_factory.connections,
     )
   cv2.imshow("SEW-Mimic webcam pose", frame)
 
 
-def _load_realtime_dependencies():
+def _load_realtime_dependencies(pose_model: Path | None = None):
   missing = []
   try:
     import cv2
@@ -148,16 +164,64 @@ def _load_realtime_dependencies():
       + ", ".join(missing)
       + ". Install them with `pip install -e '.[webcam]'` inside the unitree_rl_mjlab conda env."
     )
-  mp_pose, mp_drawing = _load_mediapipe_solutions(mp)
-  return cv2, mp_pose, mp_drawing, viewer_module
+  pose_factory, mp_drawing = _load_mediapipe_pose_factory(mp, pose_model)
+  return cv2, pose_factory, mp_drawing, viewer_module
 
 
-def _load_mediapipe_solutions(mp):
+class _LegacyPoseFactory:
+  def __init__(self, mp_pose):
+    self._mp_pose = mp_pose
+    self.connections = mp_pose.POSE_CONNECTIONS
+
+  def create(self, *, min_detection_confidence: float, min_tracking_confidence: float):
+    return self._mp_pose.Pose(
+      model_complexity=1,
+      smooth_landmarks=True,
+      min_detection_confidence=min_detection_confidence,
+      min_tracking_confidence=min_tracking_confidence,
+    )
+
+  def process(self, pose, rgb: np.ndarray, timestamp_ms: int):
+    del timestamp_ms
+    return pose.process(rgb)
+
+
+class _TasksPoseFactory:
+  def __init__(self, mp, pose_model: Path):
+    self._mp = mp
+    self._pose_model = pose_model
+    self.connections = None
+
+  def create(self, *, min_detection_confidence: float, min_tracking_confidence: float):
+    base_options = self._mp.tasks.BaseOptions(model_asset_path=str(self._pose_model))
+    options = self._mp.tasks.vision.PoseLandmarkerOptions(
+      base_options=base_options,
+      running_mode=self._mp.tasks.vision.RunningMode.VIDEO,
+      min_pose_detection_confidence=min_detection_confidence,
+      min_tracking_confidence=min_tracking_confidence,
+      num_poses=1,
+    )
+    return self._mp.tasks.vision.PoseLandmarker.create_from_options(options)
+
+  def process(self, pose, rgb: np.ndarray, timestamp_ms: int):
+    image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
+    return pose.detect_for_video(image, timestamp_ms)
+
+
+def _load_mediapipe_pose_factory(mp, pose_model: Path | None):
+  legacy = _load_legacy_mediapipe_solutions(mp)
+  if legacy is not None:
+    mp_pose, mp_drawing = legacy
+    return _LegacyPoseFactory(mp_pose), mp_drawing
+
+  return _load_tasks_pose_factory(mp, pose_model), None
+
+
+def _load_legacy_mediapipe_solutions(mp):
   solutions = getattr(mp, "solutions", None)
   if solutions is not None:
     return solutions.pose, solutions.drawing_utils
 
-  errors: list[str] = []
   for pose_module, drawing_module in (
     ("mediapipe.solutions.pose", "mediapipe.solutions.drawing_utils"),
     ("mediapipe.python.solutions.pose", "mediapipe.python.solutions.drawing_utils"),
@@ -166,18 +230,41 @@ def _load_mediapipe_solutions(mp):
       pose = importlib.import_module(pose_module)
       drawing_utils = importlib.import_module(drawing_module)
       return pose, drawing_utils
-    except ModuleNotFoundError as exc:
-      errors.append(f"{pose_module}: {exc}")
+    except ModuleNotFoundError:
+      pass
 
-  version = getattr(mp, "__version__", "unknown")
-  location = getattr(mp, "__file__", "unknown")
-  raise RuntimeError(
-    "Installed mediapipe package does not expose the legacy Pose Solutions API. "
-    f"mediapipe version={version}, file={location}. "
-    "Install the webcam extra with `pip install -e '.[webcam]'`. "
-    f"Tried: {'; '.join(errors)}"
-  )
+  return None
 
+
+def _load_tasks_pose_factory(mp, pose_model: Path | None):
+  if pose_model is None:
+    version = getattr(mp, "__version__", "unknown")
+    location = getattr(mp, "__file__", "unknown")
+    raise RuntimeError(
+      "This mediapipe build does not include the legacy Pose Solutions API; "
+      "use the MediaPipe Tasks backend by passing `--pose-model path/to/pose_landmarker_lite.task`. "
+      f"mediapipe version={version}, file={location}. "
+      "Official lite model URL: "
+      "https://storage.googleapis.com/mediapipe-models/pose_landmarker/pose_landmarker_lite/float16/1/pose_landmarker_lite.task"
+    )
+
+  model_path = Path(pose_model)
+  if not model_path.exists():
+    raise RuntimeError(f"Pose landmarker model does not exist: {model_path}")
+
+  try:
+    tasks = getattr(mp, "tasks")
+    _base_options = tasks.BaseOptions
+    _pose_landmarker = tasks.vision.PoseLandmarker
+  except AttributeError as exc:
+    version = getattr(mp, "__version__", "unknown")
+    location = getattr(mp, "__file__", "unknown")
+    raise RuntimeError(
+      "Installed mediapipe package exposes neither legacy Pose Solutions nor Tasks PoseLandmarker. "
+      f"mediapipe version={version}, file={location}."
+    ) from exc
+
+  return _TasksPoseFactory(mp, model_path)
 
 def build_arg_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(
@@ -194,6 +281,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--min-tracking-confidence", type=float, default=0.5, help="MediaPipe tracking confidence.")
   parser.add_argument("--smoothing-alpha", type=float, default=0.35, help="Joint low-pass filter alpha.")
   parser.add_argument("--no-camera-window", action="store_true", help="Only show MuJoCo, not the webcam overlay.")
+  parser.add_argument(
+    "--pose-model",
+    type=Path,
+    default=None,
+    help="MediaPipe Tasks pose_landmarker .task model path; required for mediapipe builds without mp.solutions.",
+  )
   return parser
 
 
@@ -212,6 +305,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       min_tracking_confidence=args.min_tracking_confidence,
       smoothing_alpha=args.smoothing_alpha,
       no_camera_window=args.no_camera_window,
+      pose_model=args.pose_model,
     )
   )
   return 0
