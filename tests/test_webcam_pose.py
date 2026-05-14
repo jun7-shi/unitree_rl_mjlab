@@ -6,6 +6,7 @@ from src.motion.sew_full_body import FullBodyTarget
 from src.motion.webcam_pose import (
   ExponentialJointFilter,
   full_body_target_from_mediapipe_landmarks,
+  upper_body_target_from_mediapipe_landmarks,
 )
 
 
@@ -56,6 +57,22 @@ def test_full_body_target_from_mediapipe_landmarks_rejects_low_visibility():
     assert "left_wrist" in str(exc)
   else:
     raise AssertionError("expected low visibility landmark to be rejected")
+
+
+def test_upper_body_target_from_mediapipe_landmarks_allows_missing_lower_body():
+  landmarks = _synthetic_mediapipe_pose()
+  for index in (23, 24, 25, 26, 27, 28, 31, 32):
+    landmarks[index].visibility = 0.0
+
+  target = upper_body_target_from_mediapipe_landmarks(landmarks, min_visibility=0.5)
+
+  assert target.left_arm.shoulder.shape == (3,)
+  assert target.right_arm.wrist.shape == (3,)
+  np.testing.assert_allclose(
+    target.chest_orientation.T @ target.chest_orientation,
+    np.eye(3),
+    atol=1e-7,
+  )
 
 
 def test_exponential_joint_filter_smooths_joint_angles():

@@ -5,6 +5,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import scripts.preview_sew_full_body as preview
+import scripts.preview_webcam_sew_full_body as webcam_preview
 from scripts.preview_sew_full_body import PreviewConfig, run_preview
 from tests.test_bvh_full_body import _write_tiny_full_body_bvh
 
@@ -190,6 +191,43 @@ def test_webcam_dependency_loader_requires_pose_model_for_tasks_only_mediapipe(m
     assert "pose_landmarker_lite.task" in str(exc)
   else:
     raise AssertionError("expected tasks-only mediapipe to require --pose-model")
+
+
+def test_webcam_overlay_draws_tasks_landmark_lists_without_mediapipe_drawing():
+  calls = []
+  fake_cv2 = SimpleNamespace(
+    circle=lambda *args: calls.append(("circle", args)),
+    line=lambda *args: calls.append(("line", args)),
+    putText=lambda *args: calls.append(("putText", args)),
+    imshow=lambda *args: calls.append(("imshow", args)),
+    FONT_HERSHEY_SIMPLEX=0,
+    LINE_AA=16,
+  )
+  landmarks = [SimpleNamespace(x=0.0, y=0.0, visibility=0.0) for _ in range(33)]
+  for index, xy in {
+    11: (0.25, 0.25),
+    12: (0.75, 0.25),
+    13: (0.20, 0.50),
+    14: (0.80, 0.50),
+    15: (0.15, 0.75),
+    16: (0.85, 0.75),
+  }.items():
+    landmarks[index] = SimpleNamespace(x=xy[0], y=xy[1], visibility=1.0)
+  pose_result = SimpleNamespace(pose_landmarks=[landmarks])
+  frame = __import__("numpy").zeros((100, 200, 3), dtype="uint8")
+
+  webcam_preview._draw_camera_overlay(
+    fake_cv2,
+    SimpleNamespace(connections=None),
+    None,
+    frame,
+    pose_result,
+    upper_body_only=True,
+  )
+
+  assert any(name == "circle" for name, _args in calls)
+  assert any(name == "line" for name, _args in calls)
+  assert calls[-1][0] == "imshow"
 
 
 def test_run_full_body_preview_uses_full_body_loader_defaults(monkeypatch, tmp_path):

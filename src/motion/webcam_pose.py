@@ -62,39 +62,18 @@ def full_body_target_from_mediapipe_landmarks(
 ) -> FullBodyTarget:
   """Convert MediaPipe Pose landmarks into the existing full-body SEW target."""
   points = _extract_pose_points(landmarks, scale=scale, min_visibility=min_visibility)
-  chest_orientation = _body_orientation(points)
-  left_hand_orientation = _limb_orientation(
-    points["left_wrist"] - points["left_elbow"],
-    chest_orientation[:, 2],
-  )
-  right_hand_orientation = _limb_orientation(
-    points["right_wrist"] - points["right_elbow"],
-    chest_orientation[:, 2],
+  upper = _upper_body_target_from_points(
+    points,
+    align_upper_arm_axes_to_g1=align_upper_arm_axes_to_g1,
   )
   left_foot_orientation = _limb_orientation(
     points["left_foot"] - points["left_ankle"],
-    chest_orientation[:, 2],
+    upper.chest_orientation[:, 2],
   )
   right_foot_orientation = _limb_orientation(
     points["right_foot"] - points["right_ankle"],
-    chest_orientation[:, 2],
+    upper.chest_orientation[:, 2],
   )
-
-  left_arm = ArmKeypointTarget(
-    shoulder=points["left_shoulder"],
-    elbow=points["left_elbow"],
-    wrist=points["left_wrist"],
-    hand_orientation=left_hand_orientation,
-  )
-  right_arm = ArmKeypointTarget(
-    shoulder=points["right_shoulder"],
-    elbow=points["right_elbow"],
-    wrist=points["right_wrist"],
-    hand_orientation=right_hand_orientation,
-  )
-  if align_upper_arm_axes_to_g1:
-    left_arm = _flip_upper_arm_axis(left_arm)
-    right_arm = _flip_upper_arm_axis(right_arm)
 
   return FullBodyTarget(
     lower=LowerBodyTarget(
@@ -111,12 +90,72 @@ def full_body_target_from_mediapipe_landmarks(
         foot_orientation=right_foot_orientation,
       ),
     ),
-    upper=UpperBodyTarget(
-      chest_position=0.5 * (points["left_shoulder"] + points["right_shoulder"]),
-      chest_orientation=chest_orientation,
-      left_arm=left_arm,
-      right_arm=right_arm,
-    ),
+    upper=upper,
+  )
+
+
+def upper_body_target_from_mediapipe_landmarks(
+  landmarks,
+  *,
+  scale: float = 1.0,
+  min_visibility: float = 0.5,
+  align_upper_arm_axes_to_g1: bool = True,
+) -> UpperBodyTarget:
+  """Convert MediaPipe Pose landmarks into an upper-body SEW target."""
+  roles = (
+    "left_shoulder",
+    "right_shoulder",
+    "left_elbow",
+    "right_elbow",
+    "left_wrist",
+    "right_wrist",
+  )
+  points = _extract_pose_points(
+    landmarks,
+    scale=scale,
+    min_visibility=min_visibility,
+    roles=roles,
+  )
+  return _upper_body_target_from_points(
+    points,
+    align_upper_arm_axes_to_g1=align_upper_arm_axes_to_g1,
+  )
+
+
+def _upper_body_target_from_points(
+  points: dict[str, np.ndarray],
+  *,
+  align_upper_arm_axes_to_g1: bool,
+) -> UpperBodyTarget:
+  chest_orientation = _body_orientation(points)
+  left_hand_orientation = _limb_orientation(
+    points["left_wrist"] - points["left_elbow"],
+    chest_orientation[:, 2],
+  )
+  right_hand_orientation = _limb_orientation(
+    points["right_wrist"] - points["right_elbow"],
+    chest_orientation[:, 2],
+  )
+  left_arm = ArmKeypointTarget(
+    shoulder=points["left_shoulder"],
+    elbow=points["left_elbow"],
+    wrist=points["left_wrist"],
+    hand_orientation=left_hand_orientation,
+  )
+  right_arm = ArmKeypointTarget(
+    shoulder=points["right_shoulder"],
+    elbow=points["right_elbow"],
+    wrist=points["right_wrist"],
+    hand_orientation=right_hand_orientation,
+  )
+  if align_upper_arm_axes_to_g1:
+    left_arm = _flip_upper_arm_axis(left_arm)
+    right_arm = _flip_upper_arm_axis(right_arm)
+  return UpperBodyTarget(
+    chest_position=0.5 * (points["left_shoulder"] + points["right_shoulder"]),
+    chest_orientation=chest_orientation,
+    left_arm=left_arm,
+    right_arm=right_arm,
   )
 
 
@@ -125,9 +164,14 @@ def _extract_pose_points(
   *,
   scale: float,
   min_visibility: float,
+  roles: Sequence[str] | None = None,
 ) -> dict[str, np.ndarray]:
   points: dict[str, np.ndarray] = {}
-  for name, index in MEDIAPIPE_POSE_LANDMARKS.items():
+  selected_roles = MEDIAPIPE_POSE_LANDMARKS if roles is None else {
+    role: MEDIAPIPE_POSE_LANDMARKS[role]
+    for role in roles
+  }
+  for name, index in selected_roles.items():
     landmark = landmarks[index]
     visibility = float(getattr(landmark, "visibility", 1.0))
     if visibility < min_visibility:
@@ -150,7 +194,9 @@ def _mediapipe_point_to_robot_frame(landmark, *, scale: float) -> np.ndarray:
 
 def _body_orientation(points: dict[str, np.ndarray]) -> np.ndarray:
   shoulder_mid = 0.5 * (points["left_shoulder"] + points["right_shoulder"])
-  hip_mid = 0.5 * (points["left_hip"] + points["right_hip"])
+  hip_mid = 0.5 * (points["left_hip"] + points["right_hip"]) if (
+    "left_hip" in points and "right_hip" in points
+  ) else shoulder_mid - np.array([0.0, 0.0, 1.0], dtype=float)
   y_axis = normalize(points["left_shoulder"] - points["right_shoulder"])
   z_axis = normalize(shoulder_mid - hip_mid)
   return _orthonormal_frame(y_axis=y_axis, z_axis=z_axis)

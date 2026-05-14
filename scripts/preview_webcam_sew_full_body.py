@@ -16,7 +16,12 @@ if str(REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(REPO_ROOT))
 
 from src.motion.sew_full_body import G1FullBodySEWRetargeter
-from src.motion.webcam_pose import ExponentialJointFilter, full_body_target_from_mediapipe_landmarks
+from src.motion.sew_upper_body import G1UpperBodySEWRetargeter
+from src.motion.webcam_pose import (
+  ExponentialJointFilter,
+  full_body_target_from_mediapipe_landmarks,
+  upper_body_target_from_mediapipe_landmarks,
+)
 
 
 @dataclass(frozen=True)
@@ -33,6 +38,7 @@ class WebcamPreviewConfig:
   smoothing_alpha: float = 0.35
   no_camera_window: bool = False
   pose_model: Path | None = None
+  upper_body_only: bool = False
 
 
 def run_webcam_preview(config: WebcamPreviewConfig) -> None:
@@ -48,7 +54,7 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
   capture.set(cv2.CAP_PROP_FRAME_WIDTH, config.width)
   capture.set(cv2.CAP_PROP_FRAME_HEIGHT, config.height)
 
-  retargeter = G1FullBodySEWRetargeter()
+  retargeter = G1UpperBodySEWRetargeter() if config.upper_body_only else G1FullBodySEWRetargeter()
   data = mujoco.MjData(retargeter.model)
   joint_filter = ExponentialJointFilter(alpha=config.smoothing_alpha)
   q_previous = np.zeros(len(retargeter.controlled_joint_names), dtype=float)
@@ -75,10 +81,11 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
         landmarks = _select_pose_landmarks(pose_result)
         if landmarks is not None:
           try:
-            target = full_body_target_from_mediapipe_landmarks(
+            target = _target_from_landmarks(
               landmarks,
               scale=config.landmark_scale,
               min_visibility=config.min_visibility,
+              upper_body_only=config.upper_body_only,
             )
           except ValueError:
             target = None
@@ -93,7 +100,7 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
             q_previous = q_filtered
 
         if not config.no_camera_window:
-          _draw_camera_overlay(cv2, pose_factory, mp_drawing, frame, pose_result)
+          _draw_camera_overlay(cv2, pose_factory, mp_drawing, frame, pose_result, config.upper_body_only)
           key = cv2.waitKey(1) & 0xFF
           if key in (27, ord("q")):
             break
@@ -105,6 +112,26 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
       capture.release()
       if not config.no_camera_window:
         cv2.destroyAllWindows()
+
+
+def _target_from_landmarks(
+  landmarks,
+  *,
+  scale: float,
+  min_visibility: float,
+  upper_body_only: bool,
+):
+  if upper_body_only:
+    return upper_body_target_from_mediapipe_landmarks(
+      landmarks,
+      scale=scale,
+      min_visibility=min_visibility,
+    )
+  return full_body_target_from_mediapipe_landmarks(
+    landmarks,
+    scale=scale,
+    min_visibility=min_visibility,
+  )
 
 
 def _select_pose_landmarks(pose_result):
@@ -126,7 +153,7 @@ def _first_landmark_list(landmarks):
   return None
 
 
-def _draw_camera_overlay(cv2, pose_factory, mp_drawing, frame, pose_result) -> None:
+def _draw_camera_overlay(cv2, pose_factory, mp_drawing, frame, pose_result, upper_body_only: bool = False) -> None:
   landmarks = getattr(pose_result, "pose_landmarks", None)
   if (
     mp_drawing is not None
@@ -138,7 +165,75 @@ def _draw_camera_overlay(cv2, pose_factory, mp_drawing, frame, pose_result) -> N
       landmarks,
       pose_factory.connections,
     )
+  else:
+    landmark_list = _first_landmark_list(landmarks)
+    if landmark_list is not None:
+      _draw_landmarks_with_cv2(cv2, frame, landmark_list, upper_body_only=upper_body_only)
   cv2.imshow("SEW-Mimic webcam pose", frame)
+
+
+def _draw_landmarks_with_cv2(cv2, frame, landmarks, *, upper_body_only: bool) -> None:
+  height, width = frame.shape[:2]
+  landmark_indexes = _overlay_landmark_indexes(upper_body_only)
+  for start, end in _overlay_connections(upper_body_only):
+    start_point = _landmark_pixel(landmarks, start, width, height)
+    end_point = _landmark_pixel(landmarks, end, width, height)
+    if start_point is not None and end_point is not None:
+      cv2.line(frame, start_point, end_point, (70, 220, 80), 2, cv2.LINE_AA)
+  for index in landmark_indexes:
+    point = _landmark_pixel(landmarks, index, width, height)
+    if point is not None:
+      cv2.circle(frame, point, 4, (40, 140, 255), -1, cv2.LINE_AA)
+  cv2.putText(
+    frame,
+    "upper-body" if upper_body_only else "full-body",
+    (12, 28),
+    cv2.FONT_HERSHEY_SIMPLEX,
+    0.75,
+    (255, 255, 255),
+    2,
+    cv2.LINE_AA,
+  )
+
+
+def _overlay_landmark_indexes(upper_body_only: bool) -> tuple[int, ...]:
+  upper = (11, 12, 13, 14, 15, 16)
+  lower = (23, 24, 25, 26, 27, 28, 31, 32)
+  return upper if upper_body_only else (*upper, *lower)
+
+
+def _overlay_connections(upper_body_only: bool) -> tuple[tuple[int, int], ...]:
+  upper = (
+    (11, 12),
+    (11, 13),
+    (13, 15),
+    (12, 14),
+    (14, 16),
+  )
+  lower = (
+    (11, 23),
+    (12, 24),
+    (23, 24),
+    (23, 25),
+    (25, 27),
+    (27, 31),
+    (24, 26),
+    (26, 28),
+    (28, 32),
+  )
+  return upper if upper_body_only else (*upper, *lower)
+
+
+def _landmark_pixel(landmarks, index: int, width: int, height: int):
+  if index >= len(landmarks):
+    return None
+  landmark = landmarks[index]
+  visibility = float(getattr(landmark, "visibility", 1.0))
+  if visibility < 0.2:
+    return None
+  x = int(np.clip(float(landmark.x), 0.0, 1.0) * (width - 1))
+  y = int(np.clip(float(landmark.y), 0.0, 1.0) * (height - 1))
+  return x, y
 
 
 def _load_realtime_dependencies(pose_model: Path | None = None):
@@ -282,6 +377,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--smoothing-alpha", type=float, default=0.35, help="Joint low-pass filter alpha.")
   parser.add_argument("--no-camera-window", action="store_true", help="Only show MuJoCo, not the webcam overlay.")
   parser.add_argument(
+    "--upper-body-only",
+    action="store_true",
+    help="Retarget only the waist and arms; useful when legs are outside the camera frame.",
+  )
+  parser.add_argument(
     "--pose-model",
     type=Path,
     default=None,
@@ -306,6 +406,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       smoothing_alpha=args.smoothing_alpha,
       no_camera_window=args.no_camera_window,
       pose_model=args.pose_model,
+      upper_body_only=args.upper_body_only,
     )
   )
   return 0
