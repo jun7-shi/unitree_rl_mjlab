@@ -157,15 +157,26 @@ def _load_mediapipe_solutions(mp):
   if solutions is not None:
     return solutions.pose, solutions.drawing_utils
 
-  try:
-    pose = importlib.import_module("mediapipe.python.solutions.pose")
-    drawing_utils = importlib.import_module("mediapipe.python.solutions.drawing_utils")
-  except ModuleNotFoundError as exc:
-    raise RuntimeError(
-      "Installed mediapipe package does not expose the legacy Pose Solutions API. "
-      "Install the webcam extra with `pip install -e '.[webcam]'`."
-    ) from exc
-  return pose, drawing_utils
+  errors: list[str] = []
+  for pose_module, drawing_module in (
+    ("mediapipe.solutions.pose", "mediapipe.solutions.drawing_utils"),
+    ("mediapipe.python.solutions.pose", "mediapipe.python.solutions.drawing_utils"),
+  ):
+    try:
+      pose = importlib.import_module(pose_module)
+      drawing_utils = importlib.import_module(drawing_module)
+      return pose, drawing_utils
+    except ModuleNotFoundError as exc:
+      errors.append(f"{pose_module}: {exc}")
+
+  version = getattr(mp, "__version__", "unknown")
+  location = getattr(mp, "__file__", "unknown")
+  raise RuntimeError(
+    "Installed mediapipe package does not expose the legacy Pose Solutions API. "
+    f"mediapipe version={version}, file={location}. "
+    "Install the webcam extra with `pip install -e '.[webcam]'`. "
+    f"Tried: {'; '.join(errors)}"
+  )
 
 
 def build_arg_parser() -> argparse.ArgumentParser:
