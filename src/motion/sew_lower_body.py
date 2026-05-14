@@ -9,10 +9,17 @@ import numpy as np
 
 from src import SRC_PATH
 from src.motion.sew_mimic import (
+  BoundedAngleCandidate,
+  BRANCH_V2_ALGORITHM,
+  SEWAlgorithmConfig,
+  bounded_equivalent_angle_candidates,
+  bounded_equivalent_angles,
   candidate_sort_key,
   matrix_orientation_error,
   normalize,
   orientation_error,
+  resolve_sew_algorithm_config,
+  select_limit_projected_sew_candidate,
   solve_two_axis_rotation,
   subproblem1,
 )
@@ -46,10 +53,16 @@ class LowerBodyRetargetResult:
 class G1LowerBodySEWRetargeter:
   """Retarget hip-knee-ankle leg targets to Unitree G1 lower-body joints."""
 
-  def __init__(self, xml_path: str | Path | None = None, foot_orientation_weight: float = 0.25):
+  def __init__(
+    self,
+    xml_path: str | Path | None = None,
+    foot_orientation_weight: float = 0.25,
+    algorithm_version: str | SEWAlgorithmConfig = BRANCH_V2_ALGORITHM,
+  ):
     self.xml_path = Path(xml_path) if xml_path is not None else (
       SRC_PATH / "assets" / "robots" / "unitree_g1" / "xmls" / "g1.xml"
     )
+    self.algorithm_config = resolve_sew_algorithm_config(algorithm_version)
     if foot_orientation_weight < 0.0:
       raise ValueError(f"foot_orientation_weight must be non-negative, got {foot_orientation_weight}")
     self.foot_orientation_weight = float(foot_orientation_weight)
@@ -111,7 +124,7 @@ class G1LowerBodySEWRetargeter:
     q_init: Sequence[float],
     target: LowerBodyTarget,
   ) -> LowerBodyRetargetResult:
-    q = np.clip(np.asarray(q_init, dtype=float), self.joint_limits[:, 0], self.joint_limits[:, 1])
+    q = self._clip_joint_angles(np.asarray(q_init, dtype=float))
     if q.shape != (12,):
       raise ValueError(f"q_init must have shape (12,), got {q.shape}")
 
@@ -230,7 +243,7 @@ class G1LowerBodySEWRetargeter:
     solved = q.copy()
     solved[indexes[0]] = pitch
     solved[indexes[1]] = roll
-    return np.clip(solved, self.joint_limits[:, 0], self.joint_limits[:, 1])
+    return self._clip_joint_angles(solved)
 
   def _select_segment_group_candidate(
     self,
@@ -246,6 +259,7 @@ class G1LowerBodySEWRetargeter:
       return candidate_sort_key(
         axis_error=orientation_error(self._current_leg_segment_axis(side, segment), target_segment_axis),
         joint_distance=float(np.linalg.norm(candidate_q[indexes] - q[indexes])),
+        error_tolerance=self.algorithm_config.error_tolerance,
       )
 
     return self._select_candidate(q, indexes, candidates, score)
@@ -266,22 +280,26 @@ class G1LowerBodySEWRetargeter:
     candidates: list[float],
     score,
   ) -> float:
-    best_angle: float | None = None
-    best_score: tuple[float, float] | None = None
+    scored_candidates: list[tuple[np.ndarray, tuple[float, float], float, bool]] = []
     for angle in candidates:
-      for bounded_angle in self._bounded_equivalent_angles(angle, joint_index):
+      for bounded_candidate in self._bounded_equivalent_angle_candidates(angle, joint_index):
+        bounded_angle = bounded_candidate.angle
         candidate_q = q.copy()
         candidate_q[joint_index] = bounded_angle
+        joint_distance = abs(float(bounded_angle - q[joint_index]))
         candidate_score = candidate_sort_key(
           axis_error=float(score(candidate_q)),
-          joint_distance=abs(float(bounded_angle - q[joint_index])),
+          joint_distance=joint_distance,
+          error_tolerance=self.algorithm_config.error_tolerance,
         )
-        if best_score is None or candidate_score < best_score:
-          best_score = candidate_score
-          best_angle = bounded_angle
-    if best_angle is not None:
-      return best_angle
-    return float(np.clip(candidates[0] if candidates else q[joint_index], *self.joint_limits[joint_index]))
+        scored_candidates.append((candidate_q, candidate_score, joint_distance, bounded_candidate.clipped))
+    best_q = select_limit_projected_sew_candidate(scored_candidates, config=self.algorithm_config)
+    if best_q is not None:
+      return float(best_q[joint_index])
+    fallback = float(candidates[0] if candidates else q[joint_index])
+    if not self.algorithm_config.respect_joint_limits:
+      return fallback
+    return float(np.clip(fallback, *self.joint_limits[joint_index]))
 
   def _site_axis_after_setting(
     self,
@@ -299,23 +317,22 @@ class G1LowerBodySEWRetargeter:
     relative_candidates: list[tuple[float, float]],
     score,
   ) -> np.ndarray:
-    best_q: np.ndarray | None = None
-    best_score: tuple[float, float] | None = None
+    scored_candidates: list[tuple[np.ndarray, tuple[float, float], float, bool]] = []
     for first, second in relative_candidates:
-      for candidate_values in self._bounded_angle_pairs(indexes, first, second):
+      for candidate_values, clipped in self._bounded_angle_pair_candidates(indexes, first, second):
         candidate_q = q.copy()
         candidate_q[indexes] = candidate_values
         candidate_score = score(candidate_q)
-        if best_score is None or candidate_score < best_score:
-          best_score = candidate_score
-          best_q = candidate_q
+        joint_distance = float(np.linalg.norm(candidate_q[indexes] - q[indexes]))
+        scored_candidates.append((candidate_q, candidate_score, joint_distance, clipped))
+    best_q = select_limit_projected_sew_candidate(scored_candidates, config=self.algorithm_config)
     if best_q is not None:
-      return np.clip(best_q, self.joint_limits[:, 0], self.joint_limits[:, 1])
+      return self._clip_joint_angles(best_q)
 
     fallback = q.copy()
     if relative_candidates:
       fallback[indexes] = np.array(relative_candidates[0], dtype=float)
-    return np.clip(fallback, self.joint_limits[:, 0], self.joint_limits[:, 1])
+    return self._clip_joint_angles(fallback)
 
   def _bounded_angle_pairs(
     self,
@@ -323,24 +340,39 @@ class G1LowerBodySEWRetargeter:
     first: float,
     second: float,
   ) -> list[np.ndarray]:
-    first_values = self._bounded_equivalent_angles(first, indexes[0])
-    second_values = self._bounded_equivalent_angles(second, indexes[1])
+    return [values for values, _ in self._bounded_angle_pair_candidates(indexes, first, second)]
+
+  def _bounded_angle_pair_candidates(
+    self,
+    indexes: np.ndarray,
+    first: float,
+    second: float,
+  ) -> list[tuple[np.ndarray, bool]]:
+    first_values = self._bounded_equivalent_angle_candidates(first, indexes[0])
+    second_values = self._bounded_equivalent_angle_candidates(second, indexes[1])
     return [
-      np.array([first_value, second_value], dtype=float)
+      (np.array([first_value.angle, second_value.angle], dtype=float), first_value.clipped or second_value.clipped)
       for first_value in first_values
       for second_value in second_values
     ]
 
+  def _bounded_equivalent_angle_candidates(self, angle: float, joint_index: int) -> list[BoundedAngleCandidate]:
+    return bounded_equivalent_angle_candidates(
+      angle,
+      self.joint_limits,
+      joint_index,
+      offsets=range(-2, 3),
+      config=self.algorithm_config,
+    )
+
   def _bounded_equivalent_angles(self, angle: float, joint_index: int) -> list[float]:
-    lower, upper = self.joint_limits[joint_index]
-    values = [
-      float(angle + 2.0 * np.pi * offset)
-      for offset in range(-2, 3)
-      if lower - 1e-9 <= angle + 2.0 * np.pi * offset <= upper + 1e-9
-    ]
-    if values:
-      return values
-    return []
+    return bounded_equivalent_angles(
+      angle,
+      self.joint_limits,
+      joint_index,
+      offsets=range(-2, 3),
+      config=self.algorithm_config,
+    )
 
   def _diagnostics(self, q: np.ndarray, target: LowerBodyTarget) -> dict[str, float]:
     self._set_lower_body_joint_angles(q)
@@ -389,6 +421,12 @@ class G1LowerBodySEWRetargeter:
     self.data.qpos[:] = self._qpos0
     self.data.qpos[self.controlled_qpos_addresses] = joint_angles
     mujoco.mj_forward(self.model, self.data)
+
+  def _clip_joint_angles(self, joint_angles: np.ndarray) -> np.ndarray:
+    q = np.asarray(joint_angles, dtype=float)
+    if not self.algorithm_config.respect_joint_limits:
+      return q.copy()
+    return np.clip(q, self.joint_limits[:, 0], self.joint_limits[:, 1])
 
   def _named_id(self, obj_type: mujoco.mjtObj, name: str) -> int:
     for candidate in (f"robot/{name}", name):

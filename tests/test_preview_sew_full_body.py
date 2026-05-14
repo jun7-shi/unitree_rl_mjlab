@@ -70,6 +70,88 @@ def test_webcam_preview_script_help_does_not_require_webcam_dependencies():
 
   assert result.returncode == 0, result.stderr
   assert "Retarget a live webcam human pose" in result.stdout
+  assert "--video" in result.stdout
+  assert "--flip-depth" in result.stdout
+  assert "--algorithm-version" in result.stdout
+  assert "paper_v1" in result.stdout
+  assert "branch_v2" in result.stdout
+
+
+def test_upper_body_version_plot_script_help_lists_algorithm_versions():
+  result = subprocess.run(
+    [
+      sys.executable,
+      "scripts/plot_upper_body_retarget_versions.py",
+      "--help",
+    ],
+    cwd=Path(__file__).resolve().parents[1],
+    check=False,
+    capture_output=True,
+    text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert "--versions" in result.stdout
+  assert "paper_v1" in result.stdout
+  assert "branch_v2" in result.stdout
+
+
+def test_webcam_preview_opens_video_file_source(tmp_path):
+  opened_sources = []
+  video_path = tmp_path / "input.mp4"
+  video_path.write_bytes(b"fake mp4")
+
+  class FakeCapture:
+    def __init__(self, source):
+      opened_sources.append(source)
+      self.set_calls = []
+
+    def isOpened(self):
+      return True
+
+    def set(self, key, value):
+      self.set_calls.append((key, value))
+
+  fake_cv2 = SimpleNamespace(VideoCapture=FakeCapture)
+
+  capture, source_is_file = webcam_preview._open_capture(
+    fake_cv2,
+    webcam_preview.WebcamPreviewConfig(video_path=video_path),
+  )
+
+  assert opened_sources == [str(video_path)]
+  assert source_is_file is True
+  assert capture.set_calls == []
+
+
+def test_webcam_preview_opens_camera_source_with_requested_size():
+  opened_sources = []
+
+  class FakeCapture:
+    def __init__(self, source):
+      opened_sources.append(source)
+      self.set_calls = []
+
+    def isOpened(self):
+      return True
+
+    def set(self, key, value):
+      self.set_calls.append((key, value))
+
+  fake_cv2 = SimpleNamespace(
+    VideoCapture=FakeCapture,
+    CAP_PROP_FRAME_WIDTH=3,
+    CAP_PROP_FRAME_HEIGHT=4,
+  )
+
+  capture, source_is_file = webcam_preview._open_capture(
+    fake_cv2,
+    webcam_preview.WebcamPreviewConfig(camera=2, width=640, height=480),
+  )
+
+  assert opened_sources == [2]
+  assert source_is_file is False
+  assert capture.set_calls == [(3, 640), (4, 480)]
 
 
 def test_webcam_dependency_loader_supports_mediapipe_without_top_level_solutions(monkeypatch):
@@ -261,7 +343,11 @@ def test_run_full_body_preview_uses_full_body_loader_defaults(monkeypatch, tmp_p
 
   monkeypatch.setattr(preview, "load_soma_bvh_full_body_targets", fake_load_targets)
   monkeypatch.setattr(preview, "retarget_full_body_targets", fake_retarget_targets)
-  monkeypatch.setattr(preview, "G1FullBodySEWRetargeter", lambda: object())
+  monkeypatch.setattr(
+    preview,
+    "G1FullBodySEWRetargeter",
+    lambda *, algorithm_version: {"algorithm_version": algorithm_version},
+  )
 
   run_preview(
     PreviewConfig(
@@ -278,3 +364,22 @@ def test_run_full_body_preview_uses_full_body_loader_defaults(monkeypatch, tmp_p
   assert captured["apply_lower_body_offsets"] is True
   assert captured["remove_initial_heading"] is True
   assert captured["localize_to_body_frame"] is True
+
+
+def test_full_body_preview_script_help_lists_algorithm_versions():
+  result = subprocess.run(
+    [
+      sys.executable,
+      "scripts/preview_sew_full_body.py",
+      "--help",
+    ],
+    cwd=Path(__file__).resolve().parents[1],
+    check=False,
+    capture_output=True,
+    text=True,
+  )
+
+  assert result.returncode == 0, result.stderr
+  assert "--algorithm-version" in result.stdout
+  assert "paper_v1" in result.stdout
+  assert "branch_v2" in result.stdout

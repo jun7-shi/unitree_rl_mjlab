@@ -11,11 +11,18 @@ from scipy.optimize import least_squares
 from src import SRC_PATH
 from src.motion.sew_mimic import (
   ArmKeypointTarget,
+  BRANCH_V2_ALGORITHM,
+  PAPER_V1_ALGORITHM,
+  SEWAlgorithmConfig,
+  bounded_equivalent_angle_candidates,
+  bounded_equivalent_angles,
   candidate_sort_key,
   matrix_orientation_error,
   normalize,
   orientation_error,
   rotation_vector_from_matrix,
+  resolve_sew_algorithm_config,
+  select_limit_projected_sew_candidate,
   solve_two_axis_rotation,
 )
 
@@ -37,15 +44,21 @@ class UpperBodyRetargetResult:
   success: bool
   errors: dict[str, float]
   message: str
+  solver_joint_angles: np.ndarray | None = None
 
 
 class G1UpperBodySEWRetargeter:
   """Retarget SOMA upper-body targets to G1 waist and bilateral arm joints."""
 
-  def __init__(self, xml_path: str | Path | None = None):
+  def __init__(
+    self,
+    xml_path: str | Path | None = None,
+    algorithm_version: str | SEWAlgorithmConfig = BRANCH_V2_ALGORITHM,
+  ):
     self.xml_path = Path(xml_path) if xml_path is not None else (
       SRC_PATH / "assets" / "robots" / "unitree_g1" / "xmls" / "g1.xml"
     )
+    self.algorithm_config = resolve_sew_algorithm_config(algorithm_version)
     self.model = mujoco.MjModel.from_xml_path(str(self.xml_path))
     self.data = mujoco.MjData(self.model)
     self.waist_joint_names = (
@@ -120,7 +133,33 @@ class G1UpperBodySEWRetargeter:
     target: UpperBodyTarget,
   ) -> UpperBodyRetargetResult:
     """Retarget one upper-body frame into G1 waist and arm joint angles."""
-    q = np.clip(np.asarray(q_init, dtype=float), self.joint_limits[:, 0], self.joint_limits[:, 1])
+    if self.algorithm_config.name == BRANCH_V2_ALGORITHM.name:
+      original_config = self.algorithm_config
+      self.algorithm_config = PAPER_V1_ALGORITHM
+      try:
+        raw_result = self._retarget_raw(q_init, target)
+      finally:
+        self.algorithm_config = original_config
+      raw_q = raw_result.joint_angles
+      q = self._postprocess_branch_v2_joint_angles(raw_q)
+      errors = self._diagnostics(q, target)
+      success = all(value <= 1e-3 for value in errors.values())
+      return UpperBodyRetargetResult(
+        joint_angles=q,
+        full_qpos=self.full_qpos_from_joint_angles(q),
+        success=success,
+        errors=errors,
+        message="converged" if success else "retargeting residual above tolerance",
+        solver_joint_angles=raw_q,
+      )
+    return self._retarget_raw(q_init, target)
+
+  def _retarget_raw(
+    self,
+    q_init: Sequence[float],
+    target: UpperBodyTarget,
+  ) -> UpperBodyRetargetResult:
+    q = self._clip_joint_angles(np.asarray(q_init, dtype=float))
     if q.shape != (17,):
       raise ValueError(f"q_init must have shape (17,), got {q.shape}")
 
@@ -135,6 +174,7 @@ class G1UpperBodySEWRetargeter:
       success=success,
       errors=errors,
       message="converged" if success else "retargeting residual above tolerance",
+      solver_joint_angles=q,
     )
 
   def full_qpos_from_joint_angles(self, joint_angles: Sequence[float]) -> np.ndarray:
@@ -202,7 +242,7 @@ class G1UpperBodySEWRetargeter:
     )
     solved = q.copy()
     solved[indexes] = result.x
-    return np.clip(solved, self.joint_limits[:, 0], self.joint_limits[:, 1])
+    return self._clip_joint_angles(solved)
 
   def _solve_axis_group(
     self,
@@ -234,27 +274,27 @@ class G1UpperBodySEWRetargeter:
     joint_id: int,
     target_axis: np.ndarray,
   ) -> np.ndarray:
-    best_q: np.ndarray | None = None
-    best_score: tuple[float, float] | None = None
+    scored_candidates: list[tuple[np.ndarray, tuple[float, float], float, bool]] = []
     for first, second in candidates:
-      for values in self._bounded_angle_pairs(indexes, first, second):
+      for values, clipped in self._bounded_angle_pair_candidates(indexes, first, second):
         candidate_q = q.copy()
         candidate_q[indexes] = values
         self._set_upper_body_joint_angles(candidate_q)
+        joint_distance = float(np.linalg.norm(candidate_q[indexes] - q[indexes]))
         score = candidate_sort_key(
           axis_error=orientation_error(self.data.xaxis[joint_id], target_axis),
-          joint_distance=float(np.linalg.norm(candidate_q[indexes] - q[indexes])),
+          joint_distance=joint_distance,
+          error_tolerance=self.algorithm_config.error_tolerance,
         )
-        if best_score is None or score < best_score:
-          best_score = score
-          best_q = candidate_q
+        scored_candidates.append((candidate_q, score, joint_distance, clipped))
+    best_q = select_limit_projected_sew_candidate(scored_candidates, config=self.algorithm_config)
     if best_q is not None:
-      return np.clip(best_q, self.joint_limits[:, 0], self.joint_limits[:, 1])
+      return self._clip_joint_angles(best_q)
 
     fallback = q.copy()
     if candidates:
       fallback[indexes] = np.array(candidates[0], dtype=float)
-    return np.clip(fallback, self.joint_limits[:, 0], self.joint_limits[:, 1])
+    return self._clip_joint_angles(fallback)
 
   def _bounded_angle_pairs(
     self,
@@ -262,18 +302,27 @@ class G1UpperBodySEWRetargeter:
     first: float,
     second: float,
   ) -> list[np.ndarray]:
-    first_values = self._bounded_equivalent_angles(first, indexes[0])
-    second_values = self._bounded_equivalent_angles(second, indexes[1])
-    return [np.array([a, b], dtype=float) for a in first_values for b in second_values]
+    return [values for values, _ in self._bounded_angle_pair_candidates(indexes, first, second)]
+
+  def _bounded_angle_pair_candidates(
+    self,
+    indexes: np.ndarray,
+    first: float,
+    second: float,
+  ) -> list[tuple[np.ndarray, bool]]:
+    first_values = self._bounded_equivalent_angle_candidates(first, indexes[0])
+    second_values = self._bounded_equivalent_angle_candidates(second, indexes[1])
+    return [
+      (np.array([a.angle, b.angle], dtype=float), a.clipped or b.clipped)
+      for a in first_values
+      for b in second_values
+    ]
+
+  def _bounded_equivalent_angle_candidates(self, angle: float, joint_index: int):
+    return bounded_equivalent_angle_candidates(angle, self.joint_limits, joint_index, config=self.algorithm_config)
 
   def _bounded_equivalent_angles(self, angle: float, joint_index: int) -> list[float]:
-    low, high = self.joint_limits[joint_index]
-    values: list[float] = []
-    for offset in (-2.0 * np.pi, 0.0, 2.0 * np.pi):
-      candidate = float(angle + offset)
-      if low - 1e-9 <= candidate <= high + 1e-9:
-        values.append(float(np.clip(candidate, low, high)))
-    return values
+    return bounded_equivalent_angles(angle, self.joint_limits, joint_index, config=self.algorithm_config)
 
   def _solve_wrist_group(
     self,
@@ -304,7 +353,7 @@ class G1UpperBodySEWRetargeter:
     )
     solved = q.copy()
     solved[indexes] = result.x
-    return np.clip(solved, self.joint_limits[:, 0], self.joint_limits[:, 1])
+    return self._clip_joint_angles(solved)
 
   def _diagnostics(self, q: np.ndarray, target: UpperBodyTarget) -> dict[str, float]:
     self._set_upper_body_joint_angles(q)
@@ -351,6 +400,34 @@ class G1UpperBodySEWRetargeter:
     self.data.qpos[self.controlled_qpos_addresses] = joint_angles
     mujoco.mj_forward(self.model, self.data)
 
+  def _clip_joint_angles(self, joint_angles: np.ndarray) -> np.ndarray:
+    q = np.asarray(joint_angles, dtype=float)
+    if not self.algorithm_config.respect_joint_limits:
+      return q.copy()
+    return np.clip(q, self.joint_limits[:, 0], self.joint_limits[:, 1])
+
+  def _postprocess_branch_v2_joint_angles(self, joint_angles: np.ndarray) -> np.ndarray:
+    q = np.asarray(joint_angles, dtype=float).copy()
+    for joint_index in (3, 5, 10, 12):
+      q[joint_index] = self._reflect_angle_through_nearest_pi_boundary(
+        q[joint_index],
+        self.joint_limits[joint_index],
+      )
+    return np.clip(q, self.joint_limits[:, 0], self.joint_limits[:, 1])
+
+  @staticmethod
+  def _reflect_angle_through_nearest_pi_boundary(angle: float, joint_limit: np.ndarray) -> float:
+    low, high = np.asarray(joint_limit, dtype=float)
+    reflected = float(angle)
+    for _ in range(4):
+      if reflected < low:
+        reflected = -2.0 * np.pi - reflected
+      elif reflected > high:
+        reflected = 2.0 * np.pi - reflected
+      else:
+        break
+    return float(np.clip(reflected, low, high))
+
   def _named_id(self, obj_type: mujoco.mjtObj, name: str) -> int:
     for candidate in (f"robot/{name}", name):
       obj_id = mujoco.mj_name2id(self.model, obj_type, candidate)
@@ -387,5 +464,5 @@ def retarget_upper_body_targets(
   for target in targets:
     result = adapter.retarget(q_previous, target)
     results.append(result)
-    q_previous = result.joint_angles
+    q_previous = result.solver_joint_angles if result.solver_joint_angles is not None else result.joint_angles
   return results

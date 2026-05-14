@@ -16,6 +16,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from src.motion.bvh_full_body import load_soma_bvh_full_body_targets
 from src.motion.seed_bones import G1_29DOF_JOINT_COLUMNS
+from src.motion.sew_mimic import BRANCH_V2_ALGORITHM, SEW_ALGORITHM_CONFIGS
 from src.motion.sew_full_body import G1FullBodySEWRetargeter, retarget_full_body_targets
 
 G1_FULL_BODY_JOINT_COLUMNS = tuple(G1_29DOF_JOINT_COLUMNS)
@@ -33,6 +34,7 @@ class CompareConfig:
   apply_lower_body_offsets: bool = True
   remove_initial_heading: bool = True
   localize_to_body_frame: bool = True
+  algorithm_version: str = BRANCH_V2_ALGORITHM.name
 
 
 @dataclass(frozen=True)
@@ -87,7 +89,7 @@ def compare_retarget_with_seed_csv(config: CompareConfig) -> CompareSummary:
       f"seed CSV has {len(seed_q)} rows"
     )
 
-  retargeter = G1FullBodySEWRetargeter()
+  retargeter = G1FullBodySEWRetargeter(algorithm_version=config.algorithm_version)
   results = retarget_full_body_targets(targets, retargeter=retargeter)
   if not results:
     return CompareSummary(
@@ -152,6 +154,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--max-frames", type=int, default=None, help="Compare only N frames.")
   parser.add_argument("--top-joints", type=int, default=12, help="Number of largest per-joint differences to print.")
   parser.add_argument(
+    "--algorithm-version",
+    choices=sorted(SEW_ALGORITHM_CONFIGS),
+    default=BRANCH_V2_ALGORITHM.name,
+    help="SEW candidate-selection version to evaluate.",
+  )
+  parser.add_argument(
     "--raw-orientations",
     action="store_true",
     help="Use raw BVH Chest/Hand orientations instead of soma-retargeter SOMA-to-G1 orientation offsets.",
@@ -192,6 +200,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       apply_lower_body_offsets=not args.raw_lower_body_offsets,
       remove_initial_heading=not args.keep_global_heading,
       localize_to_body_frame=not args.world_frame_targets,
+      algorithm_version=args.algorithm_version,
     )
   )
   _print_summary(summary, top_joints=args.top_joints)

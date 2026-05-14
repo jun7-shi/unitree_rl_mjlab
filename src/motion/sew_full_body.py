@@ -6,6 +6,7 @@ from typing import Sequence
 
 import numpy as np
 
+from src.motion.sew_mimic import BRANCH_V2_ALGORITHM, SEWAlgorithmConfig
 from src.motion.sew_lower_body import (
   G1LowerBodySEWRetargeter,
   LowerBodyRetargetResult,
@@ -31,14 +32,19 @@ class FullBodyRetargetResult:
   success: bool
   errors: dict[str, float]
   message: str
+  solver_joint_angles: np.ndarray | None = None
 
 
 class G1FullBodySEWRetargeter:
   """Combine G1 lower-body and upper-body SEW retargeters into a 29-DOF pose."""
 
-  def __init__(self, xml_path: str | Path | None = None):
-    self.lower = G1LowerBodySEWRetargeter(xml_path=xml_path)
-    self.upper = G1UpperBodySEWRetargeter(xml_path=xml_path)
+  def __init__(
+    self,
+    xml_path: str | Path | None = None,
+    algorithm_version: str | SEWAlgorithmConfig = BRANCH_V2_ALGORITHM,
+  ):
+    self.lower = G1LowerBodySEWRetargeter(xml_path=xml_path, algorithm_version=algorithm_version)
+    self.upper = G1UpperBodySEWRetargeter(xml_path=xml_path, algorithm_version=algorithm_version)
     self.model = self.upper.model
     self.controlled_joint_names = (
       *self.lower.controlled_joint_names,
@@ -78,12 +84,18 @@ class G1FullBodySEWRetargeter:
     full_qpos[self.lower.controlled_qpos_addresses] = lower_result.joint_angles
     errors = {**lower_result.errors, **upper_result.errors}
     success = lower_result.success and upper_result.success
+    upper_solver_q = (
+      upper_result.solver_joint_angles
+      if upper_result.solver_joint_angles is not None
+      else upper_result.joint_angles
+    )
     return FullBodyRetargetResult(
       joint_angles=np.concatenate([lower_result.joint_angles, upper_result.joint_angles]),
       full_qpos=full_qpos,
       success=success,
       errors=errors,
       message="converged" if success else "retargeting residual above tolerance",
+      solver_joint_angles=np.concatenate([lower_result.joint_angles, upper_solver_q]),
     )
 
 
@@ -99,5 +111,5 @@ def retarget_full_body_targets(
   for target in targets:
     result = adapter.retarget(q_previous, target)
     results.append(result)
-    q_previous = result.joint_angles
+    q_previous = result.solver_joint_angles if result.solver_joint_angles is not None else result.joint_angles
   return results

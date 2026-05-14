@@ -16,9 +16,11 @@ if str(REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(REPO_ROOT))
 
 from src.motion.sew_full_body import G1FullBodySEWRetargeter
+from src.motion.sew_mimic import BRANCH_V2_ALGORITHM, SEW_ALGORITHM_CONFIGS
 from src.motion.sew_upper_body import G1UpperBodySEWRetargeter
 from src.motion.webcam_pose import (
   ExponentialJointFilter,
+  ExponentialLandmarkFilter,
   full_body_target_from_mediapipe_landmarks,
   upper_body_target_from_mediapipe_landmarks,
 )
@@ -27,6 +29,7 @@ from src.motion.webcam_pose import (
 @dataclass(frozen=True)
 class WebcamPreviewConfig:
   camera: int = 0
+  video_path: Path | None = None
   width: int = 1280
   height: int = 720
   fps: float = 30.0
@@ -35,10 +38,14 @@ class WebcamPreviewConfig:
   min_visibility: float = 0.5
   min_detection_confidence: float = 0.5
   min_tracking_confidence: float = 0.5
+  landmark_smoothing_alpha: float = 0.35
   smoothing_alpha: float = 0.35
+  max_joint_delta_deg: float | None = 12.0
   no_camera_window: bool = False
   pose_model: Path | None = None
   upper_body_only: bool = False
+  flip_depth: bool = False
+  algorithm_version: str = BRANCH_V2_ALGORITHM.name
 
 
 def run_webcam_preview(config: WebcamPreviewConfig) -> None:
@@ -46,19 +53,24 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
     raise ValueError(f"width and height must be positive, got {config.width}x{config.height}")
   if config.fps <= 0.0:
     raise ValueError(f"fps must be positive, got {config.fps}")
+  if not 0.0 < config.landmark_smoothing_alpha <= 1.0:
+    raise ValueError(f"landmark_smoothing_alpha must be in (0, 1], got {config.landmark_smoothing_alpha}")
   cv2, pose_factory, mp_drawing, viewer_module = _load_realtime_dependencies(config.pose_model)
 
-  capture = cv2.VideoCapture(config.camera)
-  if not capture.isOpened():
-    raise RuntimeError(f"Could not open webcam index {config.camera}")
-  capture.set(cv2.CAP_PROP_FRAME_WIDTH, config.width)
-  capture.set(cv2.CAP_PROP_FRAME_HEIGHT, config.height)
+  capture, source_is_file = _open_capture(cv2, config)
 
-  retargeter = G1UpperBodySEWRetargeter() if config.upper_body_only else G1FullBodySEWRetargeter()
+  retargeter = (
+    G1UpperBodySEWRetargeter(algorithm_version=config.algorithm_version)
+    if config.upper_body_only
+    else G1FullBodySEWRetargeter(algorithm_version=config.algorithm_version)
+  )
   data = mujoco.MjData(retargeter.model)
-  joint_filter = ExponentialJointFilter(alpha=config.smoothing_alpha)
+  max_delta = None if config.max_joint_delta_deg is None else np.deg2rad(config.max_joint_delta_deg)
+  joint_filter = ExponentialJointFilter(alpha=config.smoothing_alpha, max_delta=max_delta)
+  landmark_filter = ExponentialLandmarkFilter(alpha=config.landmark_smoothing_alpha)
   q_previous = np.zeros(len(retargeter.controlled_joint_names), dtype=float)
   frame_dt = 1.0 / config.fps
+  frame_index = 0
 
   with pose_factory.create(
     min_detection_confidence=config.min_detection_confidence,
@@ -69,23 +81,28 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
         frame_start = time.time()
         ok, frame = capture.read()
         if not ok:
+          if source_is_file:
+            break
           time.sleep(frame_dt)
           continue
-        if config.mirror:
+        if config.mirror and not source_is_file:
           frame = cv2.flip(frame, 1)
 
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         rgb.flags.writeable = False
-        timestamp_ms = int(time.time() * 1000)
+        timestamp_ms = int(frame_index * frame_dt * 1000) if source_is_file else int(time.time() * 1000)
+        frame_index += 1
         pose_result = pose_factory.process(pose, rgb, timestamp_ms)
         landmarks = _select_pose_landmarks(pose_result)
         if landmarks is not None:
+          landmarks = landmark_filter.update(landmarks)
           try:
             target = _target_from_landmarks(
               landmarks,
               scale=config.landmark_scale,
               min_visibility=config.min_visibility,
               upper_body_only=config.upper_body_only,
+              flip_depth=config.flip_depth,
             )
           except ValueError:
             target = None
@@ -114,23 +131,44 @@ def run_webcam_preview(config: WebcamPreviewConfig) -> None:
         cv2.destroyAllWindows()
 
 
+def _open_capture(cv2, config: WebcamPreviewConfig):
+  if config.video_path is not None:
+    video_path = Path(config.video_path)
+    if not video_path.exists():
+      raise RuntimeError(f"Video file does not exist: {video_path}")
+    capture = cv2.VideoCapture(str(video_path))
+    if not capture.isOpened():
+      raise RuntimeError(f"Could not open video file: {video_path}")
+    return capture, True
+
+  capture = cv2.VideoCapture(config.camera)
+  if not capture.isOpened():
+    raise RuntimeError(f"Could not open webcam index {config.camera}")
+  capture.set(cv2.CAP_PROP_FRAME_WIDTH, config.width)
+  capture.set(cv2.CAP_PROP_FRAME_HEIGHT, config.height)
+  return capture, False
+
+
 def _target_from_landmarks(
   landmarks,
   *,
   scale: float,
   min_visibility: float,
   upper_body_only: bool,
+  flip_depth: bool,
 ):
   if upper_body_only:
     return upper_body_target_from_mediapipe_landmarks(
       landmarks,
       scale=scale,
       min_visibility=min_visibility,
+      flip_depth=flip_depth,
     )
   return full_body_target_from_mediapipe_landmarks(
     landmarks,
     scale=scale,
     min_visibility=min_visibility,
+    flip_depth=flip_depth,
   )
 
 
@@ -368,6 +406,7 @@ def build_arg_parser() -> argparse.ArgumentParser:
     description="Retarget a live webcam human pose to Unitree G1 and preview it in MuJoCo."
   )
   parser.add_argument("--camera", type=int, default=0, help="OpenCV webcam index.")
+  parser.add_argument("--video", type=Path, default=None, help="Read frames from an MP4/video file instead of webcam.")
   parser.add_argument("--width", type=int, default=1280, help="Requested camera width.")
   parser.add_argument("--height", type=int, default=720, help="Requested camera height.")
   parser.add_argument("--fps", type=float, default=30.0, help="Realtime loop rate.")
@@ -376,7 +415,16 @@ def build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--min-visibility", type=float, default=0.5, help="Minimum landmark visibility.")
   parser.add_argument("--min-detection-confidence", type=float, default=0.5, help="MediaPipe detection confidence.")
   parser.add_argument("--min-tracking-confidence", type=float, default=0.5, help="MediaPipe tracking confidence.")
+  parser.add_argument("--landmark-smoothing-alpha", type=float, default=0.35, help="MediaPipe landmark low-pass filter alpha.")
   parser.add_argument("--smoothing-alpha", type=float, default=0.35, help="Joint low-pass filter alpha.")
+  parser.add_argument("--max-joint-delta-deg", type=float, default=12.0, help="Maximum filtered joint change per frame in degrees.")
+  parser.add_argument(
+    "--algorithm-version",
+    choices=tuple(SEW_ALGORITHM_CONFIGS),
+    default=BRANCH_V2_ALGORITHM.name,
+    help="SEW candidate-selection version to use.",
+  )
+  parser.add_argument("--flip-depth", action="store_true", help="Flip MediaPipe z depth if hands in front retarget behind the robot.")
   parser.add_argument("--no-camera-window", action="store_true", help="Only show MuJoCo, not the webcam overlay.")
   parser.add_argument(
     "--upper-body-only",
@@ -397,6 +445,7 @@ def main(argv: Sequence[str] | None = None) -> int:
   run_webcam_preview(
     WebcamPreviewConfig(
       camera=args.camera,
+      video_path=args.video,
       width=args.width,
       height=args.height,
       fps=args.fps,
@@ -405,10 +454,14 @@ def main(argv: Sequence[str] | None = None) -> int:
       min_visibility=args.min_visibility,
       min_detection_confidence=args.min_detection_confidence,
       min_tracking_confidence=args.min_tracking_confidence,
+      landmark_smoothing_alpha=args.landmark_smoothing_alpha,
       smoothing_alpha=args.smoothing_alpha,
+      max_joint_delta_deg=args.max_joint_delta_deg if args.max_joint_delta_deg > 0.0 else None,
       no_camera_window=args.no_camera_window,
       pose_model=args.pose_model,
       upper_body_only=args.upper_body_only,
+      flip_depth=args.flip_depth,
+      algorithm_version=args.algorithm_version,
     )
   )
   return 0

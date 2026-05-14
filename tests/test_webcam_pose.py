@@ -5,6 +5,8 @@ import numpy as np
 from src.motion.sew_full_body import FullBodyTarget
 from src.motion.webcam_pose import (
   ExponentialJointFilter,
+  ExponentialLandmarkFilter,
+  _mediapipe_point_to_robot_frame,
   full_body_target_from_mediapipe_landmarks,
   upper_body_target_from_mediapipe_landmarks,
 )
@@ -75,6 +77,16 @@ def test_upper_body_target_from_mediapipe_landmarks_allows_missing_lower_body():
   )
 
 
+def test_mediapipe_depth_mapping_can_be_flipped():
+  landmark = _landmark(0.25, -0.5, -0.75)
+
+  default_point = _mediapipe_point_to_robot_frame(landmark, scale=2.0)
+  flipped_point = _mediapipe_point_to_robot_frame(landmark, scale=2.0, flip_depth=True)
+
+  np.testing.assert_allclose(default_point, [1.5, -0.5, 1.0])
+  np.testing.assert_allclose(flipped_point, [-1.5, -0.5, 1.0])
+
+
 def test_exponential_joint_filter_smooths_joint_angles():
   joint_filter = ExponentialJointFilter(alpha=0.25)
 
@@ -83,3 +95,26 @@ def test_exponential_joint_filter_smooths_joint_angles():
 
   np.testing.assert_allclose(first, [0.0, 1.0])
   np.testing.assert_allclose(second, [0.25, 1.5])
+
+
+def test_exponential_joint_filter_limits_single_frame_joint_delta():
+  joint_filter = ExponentialJointFilter(alpha=1.0, max_delta=0.5)
+
+  first = joint_filter.update(np.array([0.0, 0.0]))
+  second = joint_filter.update(np.array([2.0, -2.0]))
+
+  np.testing.assert_allclose(first, [0.0, 0.0])
+  np.testing.assert_allclose(second, [0.5, -0.5])
+
+
+def test_exponential_landmark_filter_smooths_xyz_and_keeps_visibility():
+  landmark_filter = ExponentialLandmarkFilter(alpha=0.25)
+  first_landmarks = [_landmark(0.0, 1.0, 2.0, visibility=0.8)]
+  second_landmarks = [_landmark(4.0, 5.0, 6.0, visibility=0.2)]
+
+  first = landmark_filter.update(first_landmarks)
+  second = landmark_filter.update(second_landmarks)
+
+  assert first[0].visibility == 0.8
+  np.testing.assert_allclose([second[0].x, second[0].y, second[0].z], [1.0, 2.0, 3.0])
+  assert second[0].visibility == 0.2

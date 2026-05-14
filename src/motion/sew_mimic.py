@@ -13,6 +13,60 @@ from src.motion.seed_bones import G1_29DOF_JOINT_COLUMNS
 
 
 ArrayLike3 = Sequence[float] | np.ndarray
+BRANCH_PRESERVATION_MAX_DISTANCE = np.deg2rad(45.0)
+
+
+@dataclass(frozen=True)
+class SEWAlgorithmConfig:
+  """Candidate-selection semantics for the SEW closed-form solver."""
+
+  name: str
+  error_tolerance: float
+  clip_limit_candidates: bool
+  branch_preserving: bool
+  respect_joint_limits: bool = True
+  max_branch_distance: float = BRANCH_PRESERVATION_MAX_DISTANCE
+  max_local_axis_error: float = 2e-2
+  limit_clip_margin: float = 0.0
+
+
+@dataclass(frozen=True)
+class BoundedAngleCandidate:
+  """A joint-limit-aware equivalent angle and whether it was limit-projected."""
+
+  angle: float
+  clipped: bool
+
+
+PAPER_V1_ALGORITHM = SEWAlgorithmConfig(
+  name="paper_v1",
+  error_tolerance=1e-9,
+  clip_limit_candidates=False,
+  branch_preserving=False,
+  respect_joint_limits=False,
+)
+BRANCH_V2_ALGORITHM = SEWAlgorithmConfig(
+  name="branch_v2",
+  error_tolerance=1e-3,
+  clip_limit_candidates=True,
+  branch_preserving=True,
+  respect_joint_limits=True,
+  limit_clip_margin=np.pi,
+)
+SEW_ALGORITHM_CONFIGS = {
+  PAPER_V1_ALGORITHM.name: PAPER_V1_ALGORITHM,
+  BRANCH_V2_ALGORITHM.name: BRANCH_V2_ALGORITHM,
+}
+
+
+def resolve_sew_algorithm_config(config: str | SEWAlgorithmConfig = BRANCH_V2_ALGORITHM) -> SEWAlgorithmConfig:
+  if isinstance(config, SEWAlgorithmConfig):
+    return config
+  try:
+    return SEW_ALGORITHM_CONFIGS[config]
+  except KeyError as exc:
+    options = ", ".join(sorted(SEW_ALGORITHM_CONFIGS))
+    raise ValueError(f"Unknown SEW algorithm version '{config}'. Expected one of: {options}") from exc
 
 
 def normalize(vector: ArrayLike3, eps: float = 1e-12) -> np.ndarray:
@@ -60,11 +114,156 @@ def candidate_sort_key(
   *,
   axis_error: float,
   joint_distance: float,
-  error_tolerance: float = 1e-9,
+  error_tolerance: float = 1e-3,
 ) -> tuple[float, float]:
   """Rank closed-form candidates while ignoring numerical error ties."""
   comparable_error = 0.0 if abs(float(axis_error)) <= error_tolerance else float(axis_error)
   return comparable_error, float(joint_distance)
+
+
+def select_sew_candidate(
+  candidates: Iterable[tuple[np.ndarray, tuple[float, float], float]],
+  *,
+  config: str | SEWAlgorithmConfig = BRANCH_V2_ALGORITHM,
+) -> np.ndarray | None:
+  """Choose a closed-form candidate according to the requested algorithm version."""
+  algorithm = resolve_sew_algorithm_config(config)
+  candidate_list = list(candidates)
+  if not candidate_list:
+    return None
+  if not algorithm.branch_preserving:
+    return min(candidate_list, key=lambda candidate: candidate[1])[0]
+  local_candidates = [
+    candidate
+    for candidate in candidate_list
+    if candidate[2] <= algorithm.max_branch_distance and candidate[1][0] <= algorithm.max_local_axis_error
+  ]
+  search_space = local_candidates or candidate_list
+  return min(search_space, key=lambda candidate: candidate[1])[0]
+
+
+def select_limit_projected_sew_candidate(
+  candidates: Iterable[tuple[np.ndarray, tuple[float, float], float, bool]],
+  *,
+  config: str | SEWAlgorithmConfig = BRANCH_V2_ALGORITHM,
+) -> np.ndarray | None:
+  """Choose a SEW candidate after joint-limit projection."""
+  algorithm = resolve_sew_algorithm_config(config)
+  candidate_list = list(candidates)
+  if not candidate_list:
+    return None
+  if algorithm.branch_preserving and algorithm.respect_joint_limits and algorithm.clip_limit_candidates:
+    local_exact = [
+      (candidate_q, score, joint_distance)
+      for candidate_q, score, joint_distance, clipped in candidate_list
+      if (
+        not clipped
+        and joint_distance <= algorithm.max_branch_distance
+        and score[0] <= algorithm.max_local_axis_error
+      )
+    ]
+    if local_exact:
+      return select_sew_candidate(local_exact, config=algorithm)
+    local_projected = [
+      (candidate_q, score, joint_distance)
+      for candidate_q, score, joint_distance, clipped in candidate_list
+      if clipped and joint_distance <= algorithm.max_branch_distance
+    ]
+    if local_projected:
+      return min(local_projected, key=lambda candidate: (candidate[2], candidate[1]))[0]
+  return select_sew_candidate(
+    (
+      (candidate_q, score, joint_distance)
+      for candidate_q, score, joint_distance, _ in candidate_list
+    ),
+    config=algorithm,
+  )
+
+
+def select_branch_preserving_candidate(
+  candidates: Iterable[tuple[np.ndarray, tuple[float, float], float]],
+  *,
+  max_joint_distance: float = BRANCH_PRESERVATION_MAX_DISTANCE,
+  max_local_axis_error: float = 2e-2,
+) -> np.ndarray | None:
+  """Choose the best candidate without leaving a nearby saturated branch."""
+  return select_sew_candidate(
+    candidates,
+    config=SEWAlgorithmConfig(
+      name="branch_preserving_custom",
+      error_tolerance=1e-3,
+      clip_limit_candidates=True,
+      branch_preserving=True,
+      respect_joint_limits=True,
+      max_branch_distance=max_joint_distance,
+      max_local_axis_error=max_local_axis_error,
+      limit_clip_margin=np.pi,
+    ),
+  )
+
+
+def bounded_equivalent_angles(
+  angle: float,
+  joint_limits: np.ndarray,
+  joint_index: int,
+  *,
+  offsets: Iterable[int] = (-1, 0, 1),
+  config: str | SEWAlgorithmConfig = BRANCH_V2_ALGORITHM,
+) -> list[float]:
+  """Return bounded angle equivalents, including branch-preserving limit clips."""
+  return [
+    candidate.angle
+    for candidate in bounded_equivalent_angle_candidates(
+      angle,
+      joint_limits,
+      joint_index,
+      offsets=offsets,
+      config=config,
+    )
+  ]
+
+
+def bounded_equivalent_angle_candidates(
+  angle: float,
+  joint_limits: np.ndarray,
+  joint_index: int,
+  *,
+  offsets: Iterable[int] = (-1, 0, 1),
+  config: str | SEWAlgorithmConfig = BRANCH_V2_ALGORITHM,
+) -> list[BoundedAngleCandidate]:
+  """Return equivalent angles annotated with whether joint limits clipped them."""
+  algorithm = resolve_sew_algorithm_config(config)
+  candidates_by_key: dict[float, BoundedAngleCandidate] = {}
+  order: list[float] = []
+
+  def add_candidate(value: float, *, clipped: bool) -> None:
+    key = round(float(value), 12)
+    candidate = BoundedAngleCandidate(angle=float(value), clipped=clipped)
+    existing = candidates_by_key.get(key)
+    if existing is None:
+      order.append(key)
+      candidates_by_key[key] = candidate
+    elif existing.clipped and not clipped:
+      candidates_by_key[key] = candidate
+
+  if not algorithm.respect_joint_limits:
+    for offset in offsets:
+      add_candidate(float(angle + 2.0 * np.pi * offset), clipped=False)
+    return [candidates_by_key[key] for key in order]
+
+  low, high = joint_limits[joint_index]
+  for offset in offsets:
+    candidate = float(angle + 2.0 * np.pi * offset)
+    if low - 1e-9 <= candidate <= high + 1e-9:
+      add_candidate(float(np.clip(candidate, low, high)), clipped=False)
+    elif (
+      algorithm.clip_limit_candidates
+      and low - algorithm.limit_clip_margin <= candidate <= high + algorithm.limit_clip_margin
+    ):
+      add_candidate(float(np.clip(candidate, low, high)), clipped=True)
+    else:
+      continue
+  return [candidates_by_key[key] for key in order]
 
 
 def rotation_vector_from_matrix(rotation: np.ndarray, eps: float = 1e-12) -> np.ndarray:
@@ -209,10 +408,16 @@ class G1SEWMimicRetargeter:
   `ArmKeypointTarget` values and feed this adapter without depending on MuJoCo.
   """
 
-  def __init__(self, side: str = "left", xml_path: str | Path | None = None):
+  def __init__(
+    self,
+    side: str = "left",
+    xml_path: str | Path | None = None,
+    algorithm_version: str | SEWAlgorithmConfig = BRANCH_V2_ALGORITHM,
+  ):
     if side not in {"left", "right"}:
       raise ValueError("side must be 'left' or 'right'")
     self.side = side
+    self.algorithm_config = resolve_sew_algorithm_config(algorithm_version)
     self.xml_path = Path(xml_path) if xml_path is not None else (
       SRC_PATH / "assets" / "robots" / "unitree_g1" / "xmls" / "g1.xml"
     )
@@ -285,7 +490,7 @@ class G1SEWMimicRetargeter:
     hand_orientation: np.ndarray,
   ) -> SEWMimicResult:
     """Retarget one G1 arm from SEW keypoints and desired hand orientation."""
-    q = np.clip(np.asarray(q_init, dtype=float).copy(), self.joint_limits[:, 0], self.joint_limits[:, 1])
+    q = self._clip_joint_angles(np.asarray(q_init, dtype=float))
     if q.shape != (7,):
       raise ValueError(f"q_init must have shape (7,), got {q.shape}")
 
@@ -341,27 +546,27 @@ class G1SEWMimicRetargeter:
     joint_id: int,
     target_axis: np.ndarray,
   ) -> np.ndarray:
-    best_q: np.ndarray | None = None
-    best_score: tuple[float, float] | None = None
+    scored_candidates: list[tuple[np.ndarray, tuple[float, float], float, bool]] = []
     for first, second in candidates:
-      for values in self._bounded_angle_pairs(indexes, first, second):
+      for values, clipped in self._bounded_angle_pair_candidates(indexes, first, second):
         candidate_q = q.copy()
         candidate_q[indexes] = values
         self._set_arm_joint_angles(candidate_q)
+        joint_distance = float(np.linalg.norm(candidate_q[indexes] - q[indexes]))
         score = candidate_sort_key(
           axis_error=orientation_error(self.data.xaxis[joint_id], target_axis),
-          joint_distance=float(np.linalg.norm(candidate_q[indexes] - q[indexes])),
+          joint_distance=joint_distance,
+          error_tolerance=self.algorithm_config.error_tolerance,
         )
-        if best_score is None or score < best_score:
-          best_score = score
-          best_q = candidate_q
+        scored_candidates.append((candidate_q, score, joint_distance, clipped))
+    best_q = select_limit_projected_sew_candidate(scored_candidates, config=self.algorithm_config)
     if best_q is not None:
-      return np.clip(best_q, self.joint_limits[:, 0], self.joint_limits[:, 1])
+      return self._clip_joint_angles(best_q)
 
     fallback = q.copy()
     if candidates:
       fallback[indexes] = np.array(candidates[0], dtype=float)
-    return np.clip(fallback, self.joint_limits[:, 0], self.joint_limits[:, 1])
+    return self._clip_joint_angles(fallback)
 
   def _bounded_angle_pairs(
     self,
@@ -369,18 +574,27 @@ class G1SEWMimicRetargeter:
     first: float,
     second: float,
   ) -> list[np.ndarray]:
-    first_values = self._bounded_equivalent_angles(first, indexes[0])
-    second_values = self._bounded_equivalent_angles(second, indexes[1])
-    return [np.array([a, b], dtype=float) for a in first_values for b in second_values]
+    return [values for values, _ in self._bounded_angle_pair_candidates(indexes, first, second)]
+
+  def _bounded_angle_pair_candidates(
+    self,
+    indexes: np.ndarray,
+    first: float,
+    second: float,
+  ) -> list[tuple[np.ndarray, bool]]:
+    first_values = self._bounded_equivalent_angle_candidates(first, indexes[0])
+    second_values = self._bounded_equivalent_angle_candidates(second, indexes[1])
+    return [
+      (np.array([a.angle, b.angle], dtype=float), a.clipped or b.clipped)
+      for a in first_values
+      for b in second_values
+    ]
+
+  def _bounded_equivalent_angle_candidates(self, angle: float, joint_index: int) -> list[BoundedAngleCandidate]:
+    return bounded_equivalent_angle_candidates(angle, self.joint_limits, joint_index, config=self.algorithm_config)
 
   def _bounded_equivalent_angles(self, angle: float, joint_index: int) -> list[float]:
-    low, high = self.joint_limits[joint_index]
-    values: list[float] = []
-    for offset in (-2.0 * np.pi, 0.0, 2.0 * np.pi):
-      candidate = float(angle + offset)
-      if low - 1e-9 <= candidate <= high + 1e-9:
-        values.append(float(np.clip(candidate, low, high)))
-    return values
+    return bounded_equivalent_angles(angle, self.joint_limits, joint_index, config=self.algorithm_config)
 
   def _solve_wrist_group(
     self,
@@ -412,7 +626,7 @@ class G1SEWMimicRetargeter:
     )
     solved = q.copy()
     solved[indexes] = result.x
-    return np.clip(solved, self.joint_limits[:, 0], self.joint_limits[:, 1])
+    return self._clip_joint_angles(solved)
 
   def _diagnostics(
     self,
@@ -435,6 +649,12 @@ class G1SEWMimicRetargeter:
     self.data.qpos[:] = self._qpos0
     self.data.qpos[self.joint_qpos_addresses] = joint_angles
     mujoco.mj_forward(self.model, self.data)
+
+  def _clip_joint_angles(self, joint_angles: np.ndarray) -> np.ndarray:
+    q = np.asarray(joint_angles, dtype=float)
+    if not self.algorithm_config.respect_joint_limits:
+      return q.copy()
+    return np.clip(q, self.joint_limits[:, 0], self.joint_limits[:, 1])
 
   def _named_id(self, obj_type: mujoco.mjtObj, name: str) -> int:
     for candidate in (f"robot/{name}", name):

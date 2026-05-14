@@ -14,6 +14,7 @@ if str(REPO_ROOT) not in sys.path:
   sys.path.insert(0, str(REPO_ROOT))
 
 from src.motion.bvh_full_body import load_soma_bvh_full_body_targets
+from src.motion.sew_mimic import BRANCH_V2_ALGORITHM, SEW_ALGORITHM_CONFIGS
 from src.motion.sew_full_body import G1FullBodySEWRetargeter, FullBodyRetargetResult, retarget_full_body_targets
 
 
@@ -30,6 +31,7 @@ class PreviewConfig:
   apply_lower_body_offsets: bool = True
   remove_initial_heading: bool = True
   localize_to_body_frame: bool = True
+  algorithm_version: str = BRANCH_V2_ALGORITHM.name
 
 
 @dataclass(frozen=True)
@@ -58,7 +60,7 @@ def run_preview(config: PreviewConfig) -> PreviewSummary:
     remove_initial_heading=config.remove_initial_heading,
     localize_to_body_frame=config.localize_to_body_frame and config.apply_lower_body_offsets,
   )
-  retargeter = G1FullBodySEWRetargeter()
+  retargeter = G1FullBodySEWRetargeter(algorithm_version=config.algorithm_version)
   results = retarget_full_body_targets(targets, retargeter=retargeter)
   summary = _summarize_results(results)
 
@@ -124,6 +126,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--start-frame", type=int, default=0, help="First BVH frame to retarget.")
   parser.add_argument("--max-frames", type=int, default=None, help="Retarget only the first N frames.")
   parser.add_argument("--fps", type=float, default=120.0, help="Playback frame rate.")
+  parser.add_argument(
+    "--algorithm-version",
+    choices=tuple(SEW_ALGORITHM_CONFIGS),
+    default=BRANCH_V2_ALGORITHM.name,
+    help="SEW candidate-selection version to use.",
+  )
   parser.add_argument("--no-viewer", action="store_true", help="Retarget and print diagnostics without opening MuJoCo.")
   parser.add_argument("--once", action="store_true", help="Play the sequence once instead of looping until closed.")
   parser.add_argument(
@@ -169,6 +177,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       apply_lower_body_offsets=not args.raw_lower_body_offsets,
       remove_initial_heading=not args.keep_global_heading,
       localize_to_body_frame=not args.world_frame_targets,
+      algorithm_version=args.algorithm_version,
     )
   )
   _print_summary(summary)

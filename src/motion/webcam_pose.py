@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from copy import copy
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -35,6 +36,36 @@ class ExponentialJointFilter:
   """Stateful exponential smoother for realtime retargeted joint angles."""
 
   alpha: float = 0.35
+  max_delta: float | None = None
+  _state: np.ndarray | None = None
+
+  def __post_init__(self) -> None:
+    if not 0.0 < self.alpha <= 1.0:
+      raise ValueError(f"alpha must be in (0, 1], got {self.alpha}")
+    if self.max_delta is not None and self.max_delta <= 0.0:
+      raise ValueError(f"max_delta must be positive when set, got {self.max_delta}")
+
+  def reset(self) -> None:
+    self._state = None
+
+  def update(self, values: Sequence[float] | np.ndarray) -> np.ndarray:
+    current = np.asarray(values, dtype=float)
+    if self._state is None or self._state.shape != current.shape:
+      self._state = current.copy()
+      return self._state.copy()
+    filtered = (1.0 - self.alpha) * self._state + self.alpha * current
+    if self.max_delta is not None:
+      delta = np.clip(filtered - self._state, -self.max_delta, self.max_delta)
+      filtered = self._state + delta
+    self._state = filtered
+    return self._state.copy()
+
+
+@dataclass
+class ExponentialLandmarkFilter:
+  """Stateful exponential smoother for MediaPipe landmark xyz coordinates."""
+
+  alpha: float = 0.35
   _state: np.ndarray | None = None
 
   def __post_init__(self) -> None:
@@ -44,13 +75,24 @@ class ExponentialJointFilter:
   def reset(self) -> None:
     self._state = None
 
-  def update(self, values: Sequence[float] | np.ndarray) -> np.ndarray:
-    current = np.asarray(values, dtype=float)
-    if self._state is None:
+  def update(self, landmarks) -> list:
+    current = np.asarray(
+      [[float(landmark.x), float(landmark.y), float(landmark.z)] for landmark in landmarks],
+      dtype=float,
+    )
+    if self._state is None or self._state.shape != current.shape:
       self._state = current.copy()
-      return self._state.copy()
-    self._state = (1.0 - self.alpha) * self._state + self.alpha * current
-    return self._state.copy()
+    else:
+      self._state = (1.0 - self.alpha) * self._state + self.alpha * current
+
+    filtered_landmarks = []
+    for landmark, coordinates in zip(landmarks, self._state):
+      filtered = copy(landmark)
+      filtered.x = float(coordinates[0])
+      filtered.y = float(coordinates[1])
+      filtered.z = float(coordinates[2])
+      filtered_landmarks.append(filtered)
+    return filtered_landmarks
 
 
 def full_body_target_from_mediapipe_landmarks(
@@ -59,9 +101,15 @@ def full_body_target_from_mediapipe_landmarks(
   scale: float = 1.0,
   min_visibility: float = 0.5,
   align_upper_arm_axes_to_g1: bool = True,
+  flip_depth: bool = False,
 ) -> FullBodyTarget:
   """Convert MediaPipe Pose landmarks into the existing full-body SEW target."""
-  points = _extract_pose_points(landmarks, scale=scale, min_visibility=min_visibility)
+  points = _extract_pose_points(
+    landmarks,
+    scale=scale,
+    min_visibility=min_visibility,
+    flip_depth=flip_depth,
+  )
   upper = _upper_body_target_from_points(
     points,
     align_upper_arm_axes_to_g1=align_upper_arm_axes_to_g1,
@@ -100,6 +148,7 @@ def upper_body_target_from_mediapipe_landmarks(
   scale: float = 1.0,
   min_visibility: float = 0.5,
   align_upper_arm_axes_to_g1: bool = True,
+  flip_depth: bool = False,
 ) -> UpperBodyTarget:
   """Convert MediaPipe Pose landmarks into an upper-body SEW target."""
   roles = (
@@ -115,6 +164,7 @@ def upper_body_target_from_mediapipe_landmarks(
     scale=scale,
     min_visibility=min_visibility,
     roles=roles,
+    flip_depth=flip_depth,
   )
   return _upper_body_target_from_points(
     points,
@@ -165,6 +215,7 @@ def _extract_pose_points(
   scale: float,
   min_visibility: float,
   roles: Sequence[str] | None = None,
+  flip_depth: bool = False,
 ) -> dict[str, np.ndarray]:
   points: dict[str, np.ndarray] = {}
   selected_roles = MEDIAPIPE_POSE_LANDMARKS if roles is None else {
@@ -176,14 +227,15 @@ def _extract_pose_points(
     visibility = float(getattr(landmark, "visibility", 1.0))
     if visibility < min_visibility:
       raise ValueError(f"MediaPipe landmark '{name}' visibility {visibility:.3f} is below {min_visibility:.3f}")
-    points[name] = _mediapipe_point_to_robot_frame(landmark, scale=scale)
+    points[name] = _mediapipe_point_to_robot_frame(landmark, scale=scale, flip_depth=flip_depth)
   return points
 
 
-def _mediapipe_point_to_robot_frame(landmark, *, scale: float) -> np.ndarray:
+def _mediapipe_point_to_robot_frame(landmark, *, scale: float, flip_depth: bool = False) -> np.ndarray:
+  robot_x = float(landmark.z) if flip_depth else -float(landmark.z)
   point = np.array(
     [
-      -float(landmark.z),
+      robot_x,
       -float(landmark.x),
       -float(landmark.y),
     ],

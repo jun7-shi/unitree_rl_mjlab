@@ -84,7 +84,11 @@ def test_compare_retarget_with_seed_csv_uses_full_body_loader_defaults(monkeypat
 
   monkeypatch.setattr(compare, "load_soma_bvh_full_body_targets", fake_load_targets)
   monkeypatch.setattr(compare, "retarget_full_body_targets", fake_retarget_targets)
-  monkeypatch.setattr(compare, "G1FullBodySEWRetargeter", lambda: object())
+  def fake_retargeter(*, algorithm_version):
+    captured["algorithm_version"] = algorithm_version
+    return object()
+
+  monkeypatch.setattr(compare, "G1FullBodySEWRetargeter", fake_retargeter)
 
   summary = compare_retarget_with_seed_csv(
     CompareConfig(
@@ -92,6 +96,7 @@ def test_compare_retarget_with_seed_csv_uses_full_body_loader_defaults(monkeypat
       seed_csv_path=csv_path,
       start_frame=1,
       max_frames=2,
+      algorithm_version="paper_v1",
     )
   )
 
@@ -101,6 +106,7 @@ def test_compare_retarget_with_seed_csv_uses_full_body_loader_defaults(monkeypat
   assert captured["apply_lower_body_offsets"] is True
   assert captured["remove_initial_heading"] is True
   assert captured["localize_to_body_frame"] is True
+  assert captured["algorithm_version"] == "paper_v1"
   assert summary.frame_count == 2
   assert summary.success_count == 2
   assert math.isclose(summary.max_abs_joint_diff_deg, 20.0)
