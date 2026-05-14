@@ -13,7 +13,7 @@ from src.motion.bvh_upper_body import (
 )
 from src.motion.sew_full_body import FullBodyTarget
 from src.motion.sew_lower_body import LegKeypointTarget, LowerBodyTarget
-from src.motion.sew_mimic import ArmKeypointTarget
+from src.motion.sew_mimic import ArmKeypointTarget, normalize
 from src.motion.sew_upper_body import UpperBodyTarget
 
 
@@ -69,6 +69,7 @@ def load_soma_bvh_full_body_targets(
   align_upper_arm_axes_to_g1: bool = False,
   apply_lower_body_offsets: bool = False,
   remove_initial_heading: bool = False,
+  localize_to_body_frame: bool = False,
 ) -> list[FullBodyTarget]:
   """Extract upper-body and bilateral leg SEW targets from a SOMA BVH."""
   names = {
@@ -104,8 +105,11 @@ def load_soma_bvh_full_body_targets(
   orientation_offsets = soma_to_g1_upper_body_orientation_offsets() if apply_orientation_offsets else None
   lower_body_offsets = soma_to_g1_lower_body_effector_config() if apply_lower_body_offsets else None
   targets: list[FullBodyTarget] = []
+  body_frames: list[np.ndarray] = []
   for frame_index in indices:
     pose = motion.frame_pose(frame_index, coordinate_rotation=soma_mujoco_to_mjlab_rotation())
+    if localize_to_body_frame:
+      body_frames.append(_body_frame_from_pose(pose, names))
     chest_orientation = pose.rotations[names["chest"]]
     left_hand_orientation = pose.rotations[names["left_hand"]]
     right_hand_orientation = pose.rotations[names["right_hand"]]
@@ -147,9 +151,53 @@ def load_soma_bvh_full_body_targets(
       )
     )
 
-  if remove_initial_heading:
+  if localize_to_body_frame:
+    targets = _localize_targets_to_body_frame(
+      targets,
+      body_frames,
+      remove_initial_heading=remove_initial_heading,
+    )
+  elif remove_initial_heading:
     targets = _remove_initial_heading(targets)
   return targets
+
+
+def _body_frame_from_pose(pose, names: dict[str, str]) -> np.ndarray:
+  left_hip = pose.positions[names["left_hip"]]
+  right_hip = pose.positions[names["right_hip"]]
+  hips = pose.positions[names["hips"]] if "hips" in names else 0.5 * (left_hip + right_hip)
+  left_axis = normalize(left_hip - right_hip)
+  up_axis = _project_body_up_axis(pose.positions[names["chest"]] - hips, left_axis)
+  forward_axis = normalize(np.cross(left_axis, up_axis))
+  up_axis = normalize(np.cross(forward_axis, left_axis))
+  return np.column_stack([forward_axis, left_axis, up_axis])
+
+
+def _project_body_up_axis(candidate: np.ndarray, left_axis: np.ndarray) -> np.ndarray:
+  for axis in (candidate, np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0])):
+    projected = axis - left_axis * float(np.dot(axis, left_axis))
+    norm = float(np.linalg.norm(projected))
+    if norm > 1e-12:
+      return projected / norm
+  raise ValueError("Cannot construct a body frame from collinear hip and chest keypoints")
+
+
+def _localize_targets_to_body_frame(
+  targets: list[FullBodyTarget],
+  body_frames: list[np.ndarray],
+  *,
+  remove_initial_heading: bool,
+) -> list[FullBodyTarget]:
+  if not targets:
+    return []
+  reference_frame = body_frames[0]
+  reference_correction = reference_frame
+  if remove_initial_heading:
+    reference_correction = _z_axis_rotation(-_heading_yaw(reference_frame)) @ reference_frame
+  return [
+    _rotate_full_body_target(target, reference_correction @ body_frame.T)
+    for target, body_frame in zip(targets, body_frames)
+  ]
 
 
 def _lower_body_target_from_raw_keypoints(pose, names: dict[str, str]) -> LowerBodyTarget:

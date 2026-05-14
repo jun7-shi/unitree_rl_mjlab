@@ -32,6 +32,7 @@ class CompareConfig:
   align_upper_arm_axes_to_g1: bool = True
   apply_lower_body_offsets: bool = True
   remove_initial_heading: bool = True
+  localize_to_body_frame: bool = True
 
 
 @dataclass(frozen=True)
@@ -78,6 +79,7 @@ def compare_retarget_with_seed_csv(config: CompareConfig) -> CompareSummary:
     align_upper_arm_axes_to_g1=config.align_upper_arm_axes_to_g1,
     apply_lower_body_offsets=config.apply_lower_body_offsets,
     remove_initial_heading=config.remove_initial_heading,
+    localize_to_body_frame=config.localize_to_body_frame and config.apply_lower_body_offsets,
   )
   if len(targets) != len(seed_q):
     raise ValueError(
@@ -169,6 +171,11 @@ def build_arg_parser() -> argparse.ArgumentParser:
     action="store_true",
     help="Keep the BVH global heading instead of removing the first frame's heading before comparison.",
   )
+  parser.add_argument(
+    "--world-frame-targets",
+    action="store_true",
+    help="Retarget BVH targets in world frame instead of localizing each frame to the body frame.",
+  )
   return parser
 
 
@@ -184,6 +191,7 @@ def main(argv: Sequence[str] | None = None) -> int:
       align_upper_arm_axes_to_g1=not args.raw_upper_arm_axes,
       apply_lower_body_offsets=not args.raw_lower_body_offsets,
       remove_initial_heading=not args.keep_global_heading,
+      localize_to_body_frame=not args.world_frame_targets,
     )
   )
   _print_summary(summary, top_joints=args.top_joints)

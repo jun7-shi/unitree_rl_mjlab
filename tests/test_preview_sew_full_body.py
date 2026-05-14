@@ -241,12 +241,14 @@ def test_run_full_body_preview_uses_full_body_loader_defaults(monkeypatch, tmp_p
     align_upper_arm_axes_to_g1,
     apply_lower_body_offsets,
     remove_initial_heading,
+    localize_to_body_frame,
   ):
     captured["frame_slice"] = frame_slice
     captured["apply_orientation_offsets"] = apply_orientation_offsets
     captured["align_upper_arm_axes_to_g1"] = align_upper_arm_axes_to_g1
     captured["apply_lower_body_offsets"] = apply_lower_body_offsets
     captured["remove_initial_heading"] = remove_initial_heading
+    captured["localize_to_body_frame"] = localize_to_body_frame
     return [object()]
 
   def fake_retarget_targets(targets, *, retargeter):
@@ -275,3 +277,4 @@ def test_run_full_body_preview_uses_full_body_loader_defaults(monkeypatch, tmp_p
   assert captured["align_upper_arm_axes_to_g1"] is True
   assert captured["apply_lower_body_offsets"] is True
   assert captured["remove_initial_heading"] is True
+  assert captured["localize_to_body_frame"] is True

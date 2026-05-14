@@ -7,6 +7,7 @@ from src.motion.bvh_full_body import (
   soma_to_g1_lower_body_effector_config,
 )
 from src.motion.bvh_sew import load_bvh, soma_mujoco_to_mjlab_rotation
+from src.motion.sew_mimic import normalize
 
 
 def _write_tiny_full_body_bvh(path):
@@ -186,6 +187,101 @@ def _write_tiny_humanoid_full_body_bvh(path):
   )
 
 
+def _write_turning_humanoid_full_body_bvh(path):
+  frame0 = [0, 0, 0, 0, 0, 0, *([0] * 42)]
+  frame1 = [0, 0, 0, 90, 0, 0, *([0] * 42)]
+  path.write_text(
+    textwrap.dedent(
+      """\
+      HIERARCHY
+      ROOT Root
+      {
+        OFFSET 0.0 0.0 0.0
+        CHANNELS 6 Xposition Yposition Zposition Zrotation Yrotation Xrotation
+        JOINT Hips
+        {
+          OFFSET 0.0 90.0 0.0
+          CHANNELS 3 Zrotation Yrotation Xrotation
+          JOINT Chest
+          {
+            OFFSET 0.0 60.0 0.0
+            CHANNELS 3 Zrotation Yrotation Xrotation
+            JOINT LeftArm
+            {
+              OFFSET 10.0 0.0 0.0
+              CHANNELS 3 Zrotation Yrotation Xrotation
+              JOINT LeftForeArm
+              {
+                OFFSET 20.0 0.0 0.0
+                CHANNELS 3 Zrotation Yrotation Xrotation
+                JOINT LeftHand
+                {
+                  OFFSET 30.0 0.0 0.0
+                  CHANNELS 3 Zrotation Yrotation Xrotation
+                }
+              }
+            }
+            JOINT RightArm
+            {
+              OFFSET -10.0 0.0 0.0
+              CHANNELS 3 Zrotation Yrotation Xrotation
+              JOINT RightForeArm
+              {
+                OFFSET -20.0 0.0 0.0
+                CHANNELS 3 Zrotation Yrotation Xrotation
+              JOINT RightHand
+              {
+                OFFSET -30.0 0.0 0.0
+                CHANNELS 3 Zrotation Yrotation Xrotation
+              }
+              }
+            }
+          }
+          JOINT LeftLeg
+          {
+            OFFSET 8.0 -5.0 0.0
+            CHANNELS 3 Zrotation Yrotation Xrotation
+            JOINT LeftShin
+            {
+              OFFSET 0.0 -40.0 0.0
+              CHANNELS 3 Zrotation Yrotation Xrotation
+              JOINT LeftFoot
+              {
+                OFFSET 0.0 -40.0 0.0
+                CHANNELS 3 Zrotation Yrotation Xrotation
+              }
+            }
+          }
+          JOINT RightLeg
+          {
+            OFFSET -8.0 -5.0 0.0
+            CHANNELS 3 Zrotation Yrotation Xrotation
+            JOINT RightShin
+            {
+              OFFSET 0.0 -40.0 0.0
+              CHANNELS 3 Zrotation Yrotation Xrotation
+              JOINT RightFoot
+              {
+                OFFSET 0.0 -40.0 0.0
+                CHANNELS 3 Zrotation Yrotation Xrotation
+              }
+            }
+          }
+        }
+      }
+      MOTION
+      Frames: 2
+      Frame Time: 0.008333
+      __FRAME0__
+      __FRAME1__
+      """
+    )
+    .replace("__FRAME0__", " ".join(str(value) for value in frame0))
+    .replace("__FRAME1__", " ".join(str(value) for value in frame1)),
+    encoding="utf-8",
+  )
+
+
 def test_load_soma_bvh_full_body_targets_extracts_upper_and_lower_body(tmp_path):
   bvh_path = tmp_path / "full.bvh"
   _write_tiny_full_body_bvh(bvh_path)
@@ -245,3 +341,24 @@ def test_load_soma_bvh_full_body_targets_can_apply_soma_to_g1_lower_body_offsets
     target.lower.left_leg.foot_orientation,
     pose.rotations["LeftFoot"] @ config.orientation_offsets["LeftFoot"],
   )
+
+
+def test_load_soma_bvh_full_body_targets_can_localize_to_body_frame(tmp_path):
+  bvh_path = tmp_path / "turning_humanoid.bvh"
+  _write_turning_humanoid_full_body_bvh(bvh_path)
+
+  targets = load_soma_bvh_full_body_targets(
+    bvh_path,
+    apply_lower_body_offsets=True,
+    localize_to_body_frame=True,
+    remove_initial_heading=True,
+  )
+
+  assert len(targets) == 2
+  first_left_thigh = normalize(targets[0].lower.left_leg.knee - targets[0].lower.left_leg.hip)
+  second_left_thigh = normalize(targets[1].lower.left_leg.knee - targets[1].lower.left_leg.hip)
+  first_right_thigh = normalize(targets[0].lower.right_leg.knee - targets[0].lower.right_leg.hip)
+  second_right_thigh = normalize(targets[1].lower.right_leg.knee - targets[1].lower.right_leg.hip)
+
+  np.testing.assert_allclose(second_left_thigh, first_left_thigh, atol=1e-10)
+  np.testing.assert_allclose(second_right_thigh, first_right_thigh, atol=1e-10)

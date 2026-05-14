@@ -248,10 +248,12 @@ def _load_realtime_dependencies(pose_model: Path | None = None):
   except ModuleNotFoundError:
     mp = None
     missing.append("mediapipe")
-  try:
-    import mujoco.viewer as viewer_module
-  except Exception as exc:
-    raise RuntimeError(f"Could not import mujoco.viewer: {exc}") from exc
+  viewer_module = sys.modules.get("mujoco.viewer")
+  if viewer_module is None:
+    try:
+      import mujoco.viewer as viewer_module
+    except Exception as exc:
+      raise RuntimeError(f"Could not import mujoco.viewer: {exc}") from exc
 
   if missing:
     raise RuntimeError(
