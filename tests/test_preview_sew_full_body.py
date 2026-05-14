@@ -1,5 +1,6 @@
 import subprocess
 import sys
+import types
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -68,6 +69,30 @@ def test_webcam_preview_script_help_does_not_require_webcam_dependencies():
 
   assert result.returncode == 0, result.stderr
   assert "Retarget a live webcam human pose" in result.stdout
+
+
+def test_webcam_dependency_loader_supports_mediapipe_without_top_level_solutions(monkeypatch):
+  import scripts.preview_webcam_sew_full_body as webcam_preview
+
+  fake_cv2 = types.ModuleType("cv2")
+  fake_mediapipe = types.ModuleType("mediapipe")
+  fake_pose = types.ModuleType("mediapipe.python.solutions.pose")
+  fake_drawing = types.ModuleType("mediapipe.python.solutions.drawing_utils")
+  fake_viewer = types.ModuleType("mujoco.viewer")
+  monkeypatch.setitem(sys.modules, "cv2", fake_cv2)
+  monkeypatch.setitem(sys.modules, "mediapipe", fake_mediapipe)
+  monkeypatch.setitem(sys.modules, "mediapipe.python", types.ModuleType("mediapipe.python"))
+  monkeypatch.setitem(sys.modules, "mediapipe.python.solutions", types.ModuleType("mediapipe.python.solutions"))
+  monkeypatch.setitem(sys.modules, "mediapipe.python.solutions.pose", fake_pose)
+  monkeypatch.setitem(sys.modules, "mediapipe.python.solutions.drawing_utils", fake_drawing)
+  monkeypatch.setitem(sys.modules, "mujoco.viewer", fake_viewer)
+
+  cv2, pose, drawing, viewer = webcam_preview._load_realtime_dependencies()
+
+  assert cv2 is fake_cv2
+  assert pose is fake_pose
+  assert drawing is fake_drawing
+  assert viewer is fake_viewer
 
 
 def test_run_full_body_preview_uses_full_body_loader_defaults(monkeypatch, tmp_path):

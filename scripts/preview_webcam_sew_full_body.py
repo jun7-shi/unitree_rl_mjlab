@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib
 import sys
 import time
 from dataclasses import dataclass
@@ -147,7 +148,24 @@ def _load_realtime_dependencies():
       + ", ".join(missing)
       + ". Install them with `pip install -e '.[webcam]'` inside the unitree_rl_mjlab conda env."
     )
-  return cv2, mp.solutions.pose, mp.solutions.drawing_utils, viewer_module
+  mp_pose, mp_drawing = _load_mediapipe_solutions(mp)
+  return cv2, mp_pose, mp_drawing, viewer_module
+
+
+def _load_mediapipe_solutions(mp):
+  solutions = getattr(mp, "solutions", None)
+  if solutions is not None:
+    return solutions.pose, solutions.drawing_utils
+
+  try:
+    pose = importlib.import_module("mediapipe.python.solutions.pose")
+    drawing_utils = importlib.import_module("mediapipe.python.solutions.drawing_utils")
+  except ModuleNotFoundError as exc:
+    raise RuntimeError(
+      "Installed mediapipe package does not expose the legacy Pose Solutions API. "
+      "Install the webcam extra with `pip install -e '.[webcam]'`."
+    ) from exc
+  return pose, drawing_utils
 
 
 def build_arg_parser() -> argparse.ArgumentParser:

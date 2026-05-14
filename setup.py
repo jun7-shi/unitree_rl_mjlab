@@ -10,8 +10,9 @@ INSTALL_REQUIRES = [
 
 EXTRAS_REQUIRE = {
     "webcam": [
-        "opencv-python",
-        "mediapipe",
+        "numpy>=1.26,<2",
+        "opencv-contrib-python>=4.8,<4.12",
+        "mediapipe>=0.10.14,<0.11",
     ],
 }
 
