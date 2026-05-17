@@ -1,0 +1,461 @@
+from __future__ import annotations
+
+import argparse
+import sys
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Sequence
+
+import mujoco
+import numpy as np
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+if str(REPO_ROOT) not in sys.path:
+  sys.path.insert(0, str(REPO_ROOT))
+
+from scripts.visualize_seed_bvh_axes import (
+  MeshSnapshot,
+  _axis_segments,
+  _load_seed_motion_rows,
+  _seed_g1_model_context,
+  _seed_g1_shoulder_center,
+  _set_qpos_from_seed_motion_row,
+)
+from src.motion.bvh_full_body import load_soma_bvh_full_body_targets
+from src.motion.bvh_upper_body import load_soma_bvh_upper_body_targets
+from src.motion.sew_full_body import FullBodyTarget
+from src.motion.sew_mimic import PAPER_V1_ALGORITHM
+from src.motion.sew_upper_body import G1UpperBodySEWRetargeter
+
+
+UPPER_BODY_START = 12
+UPPER_BODY_DOF = 17
+LEFT_SHOULDER_PITCH_UPPER_INDEX = 3
+
+
+@dataclass(frozen=True)
+class VisualizerConfig:
+  bvh_path: Path
+  seed_csv_path: Path
+  start_frame: int = 250
+  end_frame: int = 320
+  port: int = 8090
+  fps: float = 10.0
+  global_root: bool = False
+  paper_raw_offset_to_seed: bool = False
+  apply_orientation_offsets: bool = True
+  align_upper_arm_axes_to_g1: bool = True
+  remove_initial_heading: bool = True
+
+
+@dataclass(frozen=True)
+class ComparisonFrame:
+  frame_index: int
+  csv_frame: int
+  bvh_full_target: FullBodyTarget
+  seed_motion_row: list[float]
+  paper_raw_motion_row: list[float]
+  paper_raw_upper_q: np.ndarray
+  paper_raw_left_shoulder_pitch_deg: float
+  displayed_left_shoulder_pitch_deg: float
+  seed_left_shoulder_pitch_deg: float
+  display_offset_k_360: int
+
+
+def unwrap_to(value_deg: float, reference_deg: float) -> float:
+  return value_deg + 360.0 * round((reference_deg - value_deg) / 360.0)
+
+
+def paper_raw_motion_row_from_seed(
+  seed_motion_row: Sequence[float],
+  paper_raw_upper_q: Sequence[float],
+) -> list[float]:
+  row = list(seed_motion_row)
+  upper_q = list(np.asarray(paper_raw_upper_q, dtype=float))
+  if len(upper_q) != UPPER_BODY_DOF:
+    raise ValueError(f"paper_raw_upper_q must have {UPPER_BODY_DOF} values, got {len(upper_q)}")
+  row[7 + UPPER_BODY_START :] = upper_q
+  return row
+
+
+def _paper_raw_upper_body_q(config: VisualizerConfig, frame_count: int) -> list[np.ndarray]:
+  targets = load_soma_bvh_upper_body_targets(
+    config.bvh_path,
+    apply_orientation_offsets=config.apply_orientation_offsets,
+    align_upper_arm_axes_to_g1=config.align_upper_arm_axes_to_g1,
+    remove_initial_heading=config.remove_initial_heading,
+  )
+  retargeter = G1UpperBodySEWRetargeter(algorithm_version=PAPER_V1_ALGORITHM)
+  q_previous = np.zeros(UPPER_BODY_DOF, dtype=float)
+  rows: list[np.ndarray] = []
+  for target in targets[:frame_count]:
+    result = retargeter.retarget(q_previous, target)
+    raw_q = (
+      result.solver_joint_angles
+      if result.solver_joint_angles is not None
+      else result.joint_angles
+    )
+    rows.append(np.asarray(raw_q, dtype=float).copy())
+    q_previous = raw_q
+  return rows
+
+
+def build_comparison_frames(config: VisualizerConfig) -> list[ComparisonFrame]:
+  if config.start_frame < 0:
+    raise ValueError(f"start_frame must be non-negative, got {config.start_frame}")
+  if config.end_frame < config.start_frame:
+    raise ValueError(f"end_frame must be >= start_frame, got {config.end_frame}")
+
+  csv_frames, seed_rows = _load_seed_motion_rows(config.seed_csv_path)
+  frame_count = min(len(seed_rows), config.end_frame + 1)
+  if config.end_frame >= len(seed_rows):
+    raise ValueError(f"end_frame {config.end_frame} is out of range for {len(seed_rows)} seed rows")
+  paper_upper_rows = _paper_raw_upper_body_q(config, frame_count)
+  if len(paper_upper_rows) < frame_count:
+    raise ValueError(
+      f"BVH has only {len(paper_upper_rows)} upper-body targets, but seed has {frame_count}"
+    )
+  bvh_full_targets = load_soma_bvh_full_body_targets(
+    config.bvh_path,
+    apply_orientation_offsets=config.apply_orientation_offsets,
+    align_upper_arm_axes_to_g1=False,
+    apply_lower_body_offsets=False,
+    remove_initial_heading=config.remove_initial_heading,
+    localize_to_body_frame=False,
+  )
+  if len(bvh_full_targets) < frame_count:
+    raise ValueError(
+      f"BVH has only {len(bvh_full_targets)} display targets, but seed has {frame_count}"
+    )
+
+  frames: list[ComparisonFrame] = []
+  for frame_index in range(config.start_frame, config.end_frame + 1):
+    seed_row = seed_rows[frame_index]
+    paper_upper_q = paper_upper_rows[frame_index]
+    seed_pitch_deg = float(np.degrees(seed_row[7 + UPPER_BODY_START + LEFT_SHOULDER_PITCH_UPPER_INDEX]))
+    raw_pitch_deg = float(np.degrees(paper_upper_q[LEFT_SHOULDER_PITCH_UPPER_INDEX]))
+    displayed_pitch_deg = (
+      unwrap_to(raw_pitch_deg, seed_pitch_deg)
+      if config.paper_raw_offset_to_seed
+      else raw_pitch_deg
+    )
+    display_offset_k = int(round((displayed_pitch_deg - raw_pitch_deg) / 360.0))
+    display_upper_q = paper_upper_q.copy()
+    display_upper_q[LEFT_SHOULDER_PITCH_UPPER_INDEX] = np.radians(displayed_pitch_deg)
+    frames.append(
+      ComparisonFrame(
+        frame_index=frame_index,
+        csv_frame=csv_frames[frame_index],
+        bvh_full_target=bvh_full_targets[frame_index],
+        seed_motion_row=seed_row,
+        paper_raw_motion_row=paper_raw_motion_row_from_seed(seed_row, display_upper_q),
+        paper_raw_upper_q=paper_upper_q,
+        paper_raw_left_shoulder_pitch_deg=raw_pitch_deg,
+        displayed_left_shoulder_pitch_deg=displayed_pitch_deg,
+        seed_left_shoulder_pitch_deg=seed_pitch_deg,
+        display_offset_k_360=display_offset_k,
+      )
+    )
+  return frames
+
+
+def _body_frame_row(row: Sequence[float]) -> list[float]:
+  return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, *list(row)[7:]]
+
+
+def _mesh_snapshot_from_motion_row(
+  model: mujoco.MjModel,
+  data: mujoco.MjData,
+  joint_qpos_addresses: Sequence[int],
+  visual_geom_ids: Sequence[int],
+  row: Sequence[float],
+  *,
+  global_root: bool,
+) -> MeshSnapshot:
+  from mjlab.viewer.viser.conversions import merge_geoms_global
+
+  motion_row = list(row) if global_root else _body_frame_row(row)
+  _set_qpos_from_seed_motion_row(data, joint_qpos_addresses, motion_row)
+  mujoco.mj_forward(model, data)
+  mesh = merge_geoms_global(model, data, list(visual_geom_ids))
+  center = _seed_g1_shoulder_center(model, data)
+  return MeshSnapshot(
+    vertices=np.asarray(mesh.vertices, dtype=float) - center,
+    faces=np.asarray(mesh.faces, dtype=np.int32),
+  )
+
+
+def _format_info(frame: ComparisonFrame, *, global_root: bool) -> str:
+  return (
+    f"**Frame:** {frame.frame_index}  **CSV Frame:** {frame.csv_frame}<br>"
+    f"**Root/lower body:** copied from seed CSV for both robots<br>"
+    f"**Orange column:** BVH full-body keypoint skeleton after SOMA-to-mjlab conversion; "
+    f"no G1 upper-arm axis flip, no lower-body offsets<br>"
+    f"**Green column:** seed G1 CSV full pose<br>"
+    f"**Blue column:** paper_v1 raw upper-body retarget on seed root/lower-body<br>"
+    f"**Render root:** {'CSV global root' if global_root else 'body-frame root'}<br><br>"
+    f"**seed left shoulder pitch:** {frame.seed_left_shoulder_pitch_deg:.3f} deg<br>"
+    f"**paper raw left shoulder pitch:** {frame.paper_raw_left_shoulder_pitch_deg:.3f} deg<br>"
+    f"**displayed paper pitch:** {frame.displayed_left_shoulder_pitch_deg:.3f} deg "
+    f"(+ {frame.display_offset_k_360} * 360 deg)<br>"
+    f"**displayed-paper minus seed:** "
+    f"{frame.displayed_left_shoulder_pitch_deg - frame.seed_left_shoulder_pitch_deg:.3f} deg<br><br>"
+    "**Note:** adding +/-360 to a hinge joint does not change the rendered MuJoCo pose; "
+    "it only changes the printed angle convention."
+  )
+
+
+def comparison_offsets(spacing: float = 0.95) -> dict[str, np.ndarray]:
+  return {
+    "bvh": np.array([0.0, -spacing, 0.0]),
+    "seed": np.array([0.0, 0.0, 0.0]),
+    "paper": np.array([0.0, spacing, 0.0]),
+  }
+
+
+def _bvh_full_origin(target: FullBodyTarget) -> np.ndarray:
+  return 0.5 * (target.upper.left_arm.shoulder + target.upper.right_arm.shoulder)
+
+
+def _full_bvh_segments(target: FullBodyTarget, offset: np.ndarray) -> np.ndarray:
+  origin = _bvh_full_origin(target)
+
+  def p(value: np.ndarray) -> np.ndarray:
+    return np.asarray(value, dtype=float) - origin + offset
+
+  upper = target.upper
+  lower = target.lower
+  hip_center = 0.5 * (lower.left_leg.hip + lower.right_leg.hip)
+  segments = [
+    (upper.left_arm.shoulder, upper.right_arm.shoulder),
+    (upper.chest_position, upper.left_arm.shoulder),
+    (upper.chest_position, upper.right_arm.shoulder),
+    (upper.left_arm.shoulder, upper.left_arm.elbow),
+    (upper.left_arm.elbow, upper.left_arm.wrist),
+    (upper.right_arm.shoulder, upper.right_arm.elbow),
+    (upper.right_arm.elbow, upper.right_arm.wrist),
+    (upper.chest_position, hip_center),
+    (lower.left_leg.hip, lower.right_leg.hip),
+    (lower.left_leg.hip, lower.left_leg.knee),
+    (lower.left_leg.knee, lower.left_leg.ankle),
+    (lower.right_leg.hip, lower.right_leg.knee),
+    (lower.right_leg.knee, lower.right_leg.ankle),
+  ]
+  return np.asarray([[p(start), p(end)] for start, end in segments], dtype=float)
+
+
+def _full_bvh_points(target: FullBodyTarget, offset: np.ndarray) -> np.ndarray:
+  origin = _bvh_full_origin(target)
+  upper = target.upper
+  lower = target.lower
+  points = [
+    upper.chest_position,
+    upper.left_arm.shoulder,
+    upper.left_arm.elbow,
+    upper.left_arm.wrist,
+    upper.right_arm.shoulder,
+    upper.right_arm.elbow,
+    upper.right_arm.wrist,
+    lower.left_leg.hip,
+    lower.left_leg.knee,
+    lower.left_leg.ankle,
+    lower.right_leg.hip,
+    lower.right_leg.knee,
+    lower.right_leg.ankle,
+  ]
+  return np.asarray([np.asarray(point, dtype=float) - origin + offset for point in points])
+
+
+def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> None:
+  import viser
+
+  server = viser.ViserServer(port=config.port)
+  server.scene.add_grid("/grid", width=3.5, height=2.0, cell_size=0.1)
+  frame_by_index = {frame.frame_index: frame for frame in frames}
+  frame_indices = list(frame_by_index)
+  seed_context = _seed_g1_model_context()
+  paper_context = _seed_g1_model_context()
+  seed_cache: dict[int, MeshSnapshot] = {}
+  paper_cache: dict[int, MeshSnapshot] = {}
+  handles: list[object] = []
+
+  with server.gui.add_folder("Playback"):
+    frame_slider = server.gui.add_slider(
+      "Frame",
+      min=min(frame_indices),
+      max=max(frame_indices),
+      step=1,
+      initial_value=min(frame_indices),
+    )
+    play_checkbox = server.gui.add_checkbox("Play", initial_value=False)
+    fps_slider = server.gui.add_slider("FPS", min=1.0, max=60.0, step=1.0, initial_value=config.fps)
+    info_markdown = server.gui.add_markdown("")
+
+  def clear_scene() -> None:
+    while handles:
+      handles.pop().remove()
+
+  def mesh_for(
+    cache: dict[int, MeshSnapshot],
+    context,
+    frame_index: int,
+    row: Sequence[float],
+  ) -> MeshSnapshot:
+    if frame_index not in cache:
+      cache[frame_index] = _mesh_snapshot_from_motion_row(
+        *context,
+        row,
+        global_root=config.global_root,
+      )
+    return cache[frame_index]
+
+  def add_mesh(name: str, mesh: MeshSnapshot, offset: np.ndarray, color: tuple[int, int, int]) -> None:
+    handles.append(
+      server.scene.add_mesh_simple(
+        f"/{name}/mesh",
+        vertices=mesh.vertices,
+        faces=mesh.faces,
+        color=color,
+        opacity=0.65,
+        flat_shading=False,
+        side="double",
+        position=offset,
+      )
+    )
+    handles.append(
+      server.scene.add_label(
+        f"/{name}/label",
+        text=name,
+        position=offset + np.array([0.0, 0.0, 0.82]),
+        font_size_mode="scene",
+        font_scene_height=0.055,
+        anchor="center-center",
+      )
+    )
+
+  def add_bvh_target(name: str, target: FullBodyTarget, offset: np.ndarray) -> None:
+    handles.append(
+      server.scene.add_line_segments(
+        f"/{name}/skeleton",
+        points=_full_bvh_segments(target, offset),
+        colors=np.asarray((242, 143, 52), dtype=np.uint8),
+        line_width=4.5,
+      )
+    )
+    handles.append(
+      server.scene.add_line_segments(
+        f"/{name}/axes",
+        points=_axis_segments(target.upper, offset, 0.18),
+        colors=np.asarray(
+          [
+            [[240, 70, 70], [240, 70, 70]],
+            [[120, 90, 255], [120, 90, 255]],
+            [[240, 70, 70], [240, 70, 70]],
+            [[120, 90, 255], [120, 90, 255]],
+          ],
+          dtype=np.uint8,
+        ),
+        line_width=6.0,
+      )
+    )
+    handles.append(
+      server.scene.add_point_cloud(
+        f"/{name}/keypoints",
+        points=_full_bvh_points(target, offset),
+        colors=np.asarray((242, 143, 52), dtype=np.uint8),
+        point_size=0.035,
+        point_shape="circle",
+      )
+    )
+    handles.append(
+      server.scene.add_label(
+        f"/{name}/label",
+        text=name,
+        position=offset + np.array([0.0, 0.0, 0.82]),
+        font_size_mode="scene",
+        font_scene_height=0.055,
+        anchor="center-center",
+      )
+    )
+
+  def update_frame(frame_index: int) -> None:
+    frame = frame_by_index[int(frame_index)]
+    clear_scene()
+    seed_mesh = mesh_for(seed_cache, seed_context, frame.frame_index, frame.seed_motion_row)
+    paper_mesh = mesh_for(paper_cache, paper_context, frame.frame_index, frame.paper_raw_motion_row)
+    offsets = comparison_offsets()
+    add_bvh_target("BVH full skeleton", frame.bvh_full_target, offsets["bvh"])
+    add_mesh("seed G1 CSV", seed_mesh, offsets["seed"], (80, 190, 115))
+    add_mesh("paper raw upper on seed lower", paper_mesh, offsets["paper"], (80, 145, 245))
+    info_markdown.content = _format_info(frame, global_root=config.global_root)
+
+  @frame_slider.on_update
+  def _(event) -> None:
+    update_frame(int(event.target.value))
+
+  update_frame(min(frame_indices))
+  print(f"Viser seed-vs-paper-raw G1 viewer running on http://localhost:{config.port}")
+  while True:
+    if play_checkbox.value:
+      next_frame = int(frame_slider.value) + 1
+      if next_frame > max(frame_indices):
+        next_frame = min(frame_indices)
+      frame_slider.value = next_frame
+      update_frame(next_frame)
+      time.sleep(1.0 / max(float(fps_slider.value), 1e-6))
+    else:
+      time.sleep(0.1)
+
+
+def build_arg_parser() -> argparse.ArgumentParser:
+  parser = argparse.ArgumentParser(
+    description=(
+      "Visualize seed G1 CSV against paper_v1 raw upper-body retargeting, "
+      "with the BVH full-body skeleton beside them."
+    )
+  )
+  parser.add_argument("--bvh", required=True, type=Path, help="Input SOMA/bones-seed BVH file.")
+  parser.add_argument("--seed-csv", required=True, type=Path, help="Input bones-seed G1 CSV file.")
+  parser.add_argument("--start-frame", type=int, default=250, help="First frame to show.")
+  parser.add_argument("--end-frame", type=int, default=320, help="Last frame to show, inclusive.")
+  parser.add_argument("--port", type=int, default=8090, help="Viser web server port.")
+  parser.add_argument("--fps", type=float, default=10.0, help="Autoplay FPS.")
+  parser.add_argument(
+    "--paper-raw-offset-to-seed",
+    action="store_true",
+    help="Display paper raw left_shoulder_pitch after adding k*360 to the seed angle neighborhood.",
+  )
+  parser.add_argument(
+    "--global-root",
+    action="store_true",
+    help="Render the CSV root pose. By default both robots are shown in body-frame root for easier side-by-side comparison.",
+  )
+  parser.add_argument("--raw-orientations", action="store_true", help="Disable SOMA-to-G1 orientation offsets.")
+  parser.add_argument("--raw-upper-arm-axes", action="store_true", help="Disable upper-arm G1 convention flip.")
+  parser.add_argument("--keep-global-heading", action="store_true", help="Keep the BVH initial heading.")
+  return parser
+
+
+def main(argv: Sequence[str] | None = None) -> int:
+  args = build_arg_parser().parse_args(argv)
+  config = VisualizerConfig(
+    bvh_path=args.bvh,
+    seed_csv_path=args.seed_csv,
+    start_frame=args.start_frame,
+    end_frame=args.end_frame,
+    port=args.port,
+    fps=args.fps,
+    global_root=args.global_root,
+    paper_raw_offset_to_seed=args.paper_raw_offset_to_seed,
+    apply_orientation_offsets=not args.raw_orientations,
+    align_upper_arm_axes_to_g1=not args.raw_upper_arm_axes,
+    remove_initial_heading=not args.keep_global_heading,
+  )
+  frames = build_comparison_frames(config)
+  _run_viser(frames, config)
+  return 0
+
+
+if __name__ == "__main__":
+  raise SystemExit(main())
