@@ -74,7 +74,20 @@ class ArticulatedGeomPoseSnapshot:
 class ArticulatedRobotHandles:
   geom_ids: tuple[int, ...]
   mesh_handles: tuple[object, ...]
-  label_handle: object
+
+
+@dataclass(frozen=True)
+class BvhDisplaySnapshot:
+  skeleton_segments: np.ndarray
+  axis_segments: np.ndarray
+  keypoints: np.ndarray
+
+
+@dataclass(frozen=True)
+class BvhDisplayHandles:
+  skeleton_handle: object
+  axes_handle: object
+  keypoints_handle: object
 
 
 def unwrap_to(value_deg: float, reference_deg: float) -> float:
@@ -341,6 +354,14 @@ def _full_bvh_points(target: FullBodyTarget, offset: np.ndarray) -> np.ndarray:
   return np.asarray([np.asarray(point, dtype=float) - origin + offset for point in points])
 
 
+def _bvh_display_snapshot(target: FullBodyTarget, offset: np.ndarray) -> BvhDisplaySnapshot:
+  return BvhDisplaySnapshot(
+    skeleton_segments=_full_bvh_segments(target, offset),
+    axis_segments=_axis_segments(target.upper, offset, 0.18),
+    keypoints=_full_bvh_points(target, offset),
+  )
+
+
 def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> None:
   import viser
 
@@ -352,7 +373,6 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
   paper_context = _seed_g1_model_context()
   offsets = comparison_offsets()
   geom_mesh_cache: dict[int, MeshSnapshot] = {}
-  bvh_handles: list[object] = []
   last_rendered_frame: int | None = None
 
   with server.gui.add_folder("Playback"):
@@ -366,10 +386,6 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
     play_checkbox = server.gui.add_checkbox("Play", initial_value=False)
     fps_slider = server.gui.add_slider("FPS", min=1.0, max=60.0, step=1.0, initial_value=config.fps)
     info_markdown = server.gui.add_markdown("")
-
-  def clear_bvh_scene() -> None:
-    while bvh_handles:
-      bvh_handles.pop().remove()
 
   def geom_mesh(geom_id: int) -> MeshSnapshot:
     if geom_id not in geom_mesh_cache:
@@ -409,18 +425,9 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
           wxyz=pose.wxyzs[pose_index],
         )
       )
-    label_handle = server.scene.add_label(
-      f"/{name}/label",
-      text=name,
-      position=offset + np.array([0.0, 0.0, 0.82]),
-      font_size_mode="scene",
-      font_scene_height=0.055,
-      anchor="center-center",
-    )
     return ArticulatedRobotHandles(
       geom_ids=pose.geom_ids,
       mesh_handles=tuple(mesh_handles),
-      label_handle=label_handle,
     )
 
   def update_articulated_robot(
@@ -443,19 +450,17 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
       handle.position = position
       handle.wxyz = wxyz
 
-  def add_bvh_target(name: str, target: FullBodyTarget, offset: np.ndarray) -> None:
-    bvh_handles.append(
-      server.scene.add_line_segments(
+  def add_bvh_target(name: str, target: FullBodyTarget, offset: np.ndarray) -> BvhDisplayHandles:
+    snapshot = _bvh_display_snapshot(target, offset)
+    skeleton_handle = server.scene.add_line_segments(
         f"/{name}/skeleton",
-        points=_full_bvh_segments(target, offset),
+        points=snapshot.skeleton_segments,
         colors=np.asarray((242, 143, 52), dtype=np.uint8),
         line_width=4.5,
       )
-    )
-    bvh_handles.append(
-      server.scene.add_line_segments(
+    axes_handle = server.scene.add_line_segments(
         f"/{name}/axes",
-        points=_axis_segments(target.upper, offset, 0.18),
+        points=snapshot.axis_segments,
         colors=np.asarray(
           [
             [[240, 70, 70], [240, 70, 70]],
@@ -467,28 +472,31 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
         ),
         line_width=6.0,
       )
-    )
-    bvh_handles.append(
-      server.scene.add_point_cloud(
+    keypoints_handle = server.scene.add_point_cloud(
         f"/{name}/keypoints",
-        points=_full_bvh_points(target, offset),
+        points=snapshot.keypoints,
         colors=np.asarray((242, 143, 52), dtype=np.uint8),
         point_size=0.035,
         point_shape="circle",
       )
-    )
-    bvh_handles.append(
-      server.scene.add_label(
-        f"/{name}/label",
-        text=name,
-        position=offset + np.array([0.0, 0.0, 0.82]),
-        font_size_mode="scene",
-        font_scene_height=0.055,
-        anchor="center-center",
-      )
+    return BvhDisplayHandles(
+      skeleton_handle=skeleton_handle,
+      axes_handle=axes_handle,
+      keypoints_handle=keypoints_handle,
     )
 
+  def update_bvh_target(
+    handles: BvhDisplayHandles,
+    target: FullBodyTarget,
+    offset: np.ndarray,
+  ) -> None:
+    snapshot = _bvh_display_snapshot(target, offset)
+    handles.skeleton_handle.points = snapshot.skeleton_segments
+    handles.axes_handle.points = snapshot.axis_segments
+    handles.keypoints_handle.points = snapshot.keypoints
+
   initial_frame = frame_by_index[min(frame_indices)]
+  bvh_display = add_bvh_target("BVH full skeleton", initial_frame.bvh_full_target, offsets["bvh"])
   seed_robot = add_articulated_robot(
     "seed G1 CSV",
     seed_context,
@@ -510,7 +518,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
     if last_rendered_frame == frame_index:
       return
     frame = frame_by_index[int(frame_index)]
-    clear_bvh_scene()
+    update_bvh_target(bvh_display, frame.bvh_full_target, offsets["bvh"])
     update_articulated_robot(seed_robot, seed_context, frame.seed_motion_row, offsets["seed"])
     update_articulated_robot(
       paper_robot,
@@ -518,7 +526,6 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
       frame.paper_raw_motion_row,
       offsets["paper"],
     )
-    add_bvh_target("BVH full skeleton", frame.bvh_full_target, offsets["bvh"])
     info_markdown.content = _format_info(frame, global_root=config.global_root)
     last_rendered_frame = frame_index
 

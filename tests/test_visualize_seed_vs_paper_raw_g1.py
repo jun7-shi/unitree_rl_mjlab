@@ -149,3 +149,25 @@ def test_articulated_g1_pose_snapshot_updates_geom_transforms_not_meshes():
     not np.allclose(lhs, rhs)
     for lhs, rhs in zip(neutral.positions, moved.positions)
   )
+
+
+def test_bvh_display_snapshot_updates_points_with_stable_shapes(tmp_path):
+  from scripts.visualize_seed_vs_paper_raw_g1 import _bvh_display_snapshot
+  from src.motion.bvh_full_body import load_soma_bvh_full_body_targets
+
+  bvh_path = tmp_path / "full.bvh"
+  _write_tiny_full_body_bvh(bvh_path)
+  targets = load_soma_bvh_full_body_targets(
+    bvh_path,
+    apply_orientation_offsets=False,
+    align_upper_arm_axes_to_g1=False,
+    remove_initial_heading=False,
+  )
+
+  first = _bvh_display_snapshot(targets[0], np.zeros(3))
+  second = _bvh_display_snapshot(targets[0], np.array([0.0, 0.5, 0.0]))
+
+  assert first.skeleton_segments.shape == second.skeleton_segments.shape
+  assert first.axis_segments.shape == second.axis_segments.shape
+  assert first.keypoints.shape == second.keypoints.shape
+  assert not np.allclose(first.skeleton_segments, second.skeleton_segments)
