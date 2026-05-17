@@ -63,6 +63,20 @@ class ComparisonFrame:
   display_offset_k_360: int
 
 
+@dataclass(frozen=True)
+class ArticulatedGeomPoseSnapshot:
+  geom_ids: tuple[int, ...]
+  positions: np.ndarray
+  wxyzs: np.ndarray
+
+
+@dataclass(frozen=True)
+class ArticulatedRobotHandles:
+  geom_ids: tuple[int, ...]
+  mesh_handles: tuple[object, ...]
+  label_handle: object
+
+
 def unwrap_to(value_deg: float, reference_deg: float) -> float:
   return value_deg + 360.0 * round((reference_deg - value_deg) / 360.0)
 
@@ -164,6 +178,56 @@ def _body_frame_row(row: Sequence[float]) -> list[float]:
   return [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0, *list(row)[7:]]
 
 
+def _wxyz_from_xmat(xmat: Sequence[float]) -> np.ndarray:
+  quat = np.empty(4, dtype=float)
+  mujoco.mju_mat2Quat(quat, np.asarray(xmat, dtype=float).reshape(9))
+  return quat
+
+
+def _articulated_geom_pose_snapshot(
+  model: mujoco.MjModel,
+  data: mujoco.MjData,
+  joint_qpos_addresses: Sequence[int],
+  geom_ids: Sequence[int],
+  row: Sequence[float],
+  *,
+  offset: np.ndarray,
+  global_root: bool,
+) -> ArticulatedGeomPoseSnapshot:
+  motion_row = list(row) if global_root else _body_frame_row(row)
+  _set_qpos_from_seed_motion_row(data, joint_qpos_addresses, motion_row)
+  mujoco.mj_forward(model, data)
+  center = _seed_g1_shoulder_center(model, data)
+  geom_id_tuple = tuple(int(geom_id) for geom_id in geom_ids)
+  return ArticulatedGeomPoseSnapshot(
+    geom_ids=geom_id_tuple,
+    positions=np.asarray(
+      [
+        np.asarray(data.geom_xpos[geom_id], dtype=float) - center + offset
+        for geom_id in geom_id_tuple
+      ],
+      dtype=float,
+    ),
+    wxyzs=np.asarray(
+      [_wxyz_from_xmat(data.geom_xmat[geom_id]) for geom_id in geom_id_tuple],
+      dtype=float,
+    ),
+  )
+
+
+def _geom_mesh_snapshot(model: mujoco.MjModel, geom_id: int) -> MeshSnapshot:
+  from mjlab.viewer.viser.conversions import create_primitive_mesh, mujoco_mesh_to_trimesh
+
+  if int(model.geom_type[geom_id]) == int(mujoco.mjtGeom.mjGEOM_MESH):
+    mesh = mujoco_mesh_to_trimesh(model, geom_id, verbose=False)
+  else:
+    mesh = create_primitive_mesh(model, geom_id)
+  return MeshSnapshot(
+    vertices=np.asarray(mesh.vertices, dtype=float),
+    faces=np.asarray(mesh.faces, dtype=np.int32),
+  )
+
+
 def _mesh_snapshot_from_motion_row(
   model: mujoco.MjModel,
   data: mujoco.MjData,
@@ -212,6 +276,16 @@ def comparison_offsets(spacing: float = 0.95) -> dict[str, np.ndarray]:
     "seed": np.array([0.0, 0.0, 0.0]),
     "paper": np.array([0.0, spacing, 0.0]),
   }
+
+
+def next_frame_index(current_frame: int, frame_indices: Sequence[int]) -> int:
+  ordered = sorted(int(frame_index) for frame_index in frame_indices)
+  if not ordered:
+    raise ValueError("frame_indices must not be empty")
+  for frame_index in ordered:
+    if frame_index > int(current_frame):
+      return frame_index
+  return ordered[0]
 
 
 def _bvh_full_origin(target: FullBodyTarget) -> np.ndarray:
@@ -276,9 +350,10 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
   frame_indices = list(frame_by_index)
   seed_context = _seed_g1_model_context()
   paper_context = _seed_g1_model_context()
-  seed_cache: dict[int, MeshSnapshot] = {}
-  paper_cache: dict[int, MeshSnapshot] = {}
-  handles: list[object] = []
+  offsets = comparison_offsets()
+  geom_mesh_cache: dict[int, MeshSnapshot] = {}
+  bvh_handles: list[object] = []
+  last_rendered_frame: int | None = None
 
   with server.gui.add_folder("Playback"):
     frame_slider = server.gui.add_slider(
@@ -292,50 +367,84 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
     fps_slider = server.gui.add_slider("FPS", min=1.0, max=60.0, step=1.0, initial_value=config.fps)
     info_markdown = server.gui.add_markdown("")
 
-  def clear_scene() -> None:
-    while handles:
-      handles.pop().remove()
+  def clear_bvh_scene() -> None:
+    while bvh_handles:
+      bvh_handles.pop().remove()
 
-  def mesh_for(
-    cache: dict[int, MeshSnapshot],
+  def geom_mesh(geom_id: int) -> MeshSnapshot:
+    if geom_id not in geom_mesh_cache:
+      geom_mesh_cache[geom_id] = _geom_mesh_snapshot(seed_context[0], geom_id)
+    return geom_mesh_cache[geom_id]
+
+  def add_articulated_robot(
+    name: str,
     context,
-    frame_index: int,
     row: Sequence[float],
-  ) -> MeshSnapshot:
-    if frame_index not in cache:
-      cache[frame_index] = _mesh_snapshot_from_motion_row(
-        *context,
-        row,
-        global_root=config.global_root,
+    offset: np.ndarray,
+    color: tuple[int, int, int],
+  ) -> ArticulatedRobotHandles:
+    model, data, joint_qpos_addresses, visual_geom_ids = context
+    pose = _articulated_geom_pose_snapshot(
+      model,
+      data,
+      joint_qpos_addresses,
+      visual_geom_ids,
+      row,
+      offset=offset,
+      global_root=config.global_root,
+    )
+    mesh_handles = []
+    for pose_index, geom_id in enumerate(pose.geom_ids):
+      mesh = geom_mesh(geom_id)
+      mesh_handles.append(
+        server.scene.add_mesh_simple(
+          f"/{name}/geom_{geom_id}",
+          vertices=mesh.vertices,
+          faces=mesh.faces,
+          color=color,
+          opacity=0.65,
+          flat_shading=False,
+          side="double",
+          position=pose.positions[pose_index],
+          wxyz=pose.wxyzs[pose_index],
+        )
       )
-    return cache[frame_index]
+    label_handle = server.scene.add_label(
+      f"/{name}/label",
+      text=name,
+      position=offset + np.array([0.0, 0.0, 0.82]),
+      font_size_mode="scene",
+      font_scene_height=0.055,
+      anchor="center-center",
+    )
+    return ArticulatedRobotHandles(
+      geom_ids=pose.geom_ids,
+      mesh_handles=tuple(mesh_handles),
+      label_handle=label_handle,
+    )
 
-  def add_mesh(name: str, mesh: MeshSnapshot, offset: np.ndarray, color: tuple[int, int, int]) -> None:
-    handles.append(
-      server.scene.add_mesh_simple(
-        f"/{name}/mesh",
-        vertices=mesh.vertices,
-        faces=mesh.faces,
-        color=color,
-        opacity=0.65,
-        flat_shading=False,
-        side="double",
-        position=offset,
-      )
+  def update_articulated_robot(
+    handles: ArticulatedRobotHandles,
+    context,
+    row: Sequence[float],
+    offset: np.ndarray,
+  ) -> None:
+    model, data, joint_qpos_addresses, _visual_geom_ids = context
+    pose = _articulated_geom_pose_snapshot(
+      model,
+      data,
+      joint_qpos_addresses,
+      handles.geom_ids,
+      row,
+      offset=offset,
+      global_root=config.global_root,
     )
-    handles.append(
-      server.scene.add_label(
-        f"/{name}/label",
-        text=name,
-        position=offset + np.array([0.0, 0.0, 0.82]),
-        font_size_mode="scene",
-        font_scene_height=0.055,
-        anchor="center-center",
-      )
-    )
+    for handle, position, wxyz in zip(handles.mesh_handles, pose.positions, pose.wxyzs):
+      handle.position = position
+      handle.wxyz = wxyz
 
   def add_bvh_target(name: str, target: FullBodyTarget, offset: np.ndarray) -> None:
-    handles.append(
+    bvh_handles.append(
       server.scene.add_line_segments(
         f"/{name}/skeleton",
         points=_full_bvh_segments(target, offset),
@@ -343,7 +452,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
         line_width=4.5,
       )
     )
-    handles.append(
+    bvh_handles.append(
       server.scene.add_line_segments(
         f"/{name}/axes",
         points=_axis_segments(target.upper, offset, 0.18),
@@ -359,7 +468,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
         line_width=6.0,
       )
     )
-    handles.append(
+    bvh_handles.append(
       server.scene.add_point_cloud(
         f"/{name}/keypoints",
         points=_full_bvh_points(target, offset),
@@ -368,7 +477,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
         point_shape="circle",
       )
     )
-    handles.append(
+    bvh_handles.append(
       server.scene.add_label(
         f"/{name}/label",
         text=name,
@@ -379,16 +488,39 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
       )
     )
 
+  initial_frame = frame_by_index[min(frame_indices)]
+  seed_robot = add_articulated_robot(
+    "seed G1 CSV",
+    seed_context,
+    initial_frame.seed_motion_row,
+    offsets["seed"],
+    (80, 190, 115),
+  )
+  paper_robot = add_articulated_robot(
+    "paper raw upper on seed lower",
+    paper_context,
+    initial_frame.paper_raw_motion_row,
+    offsets["paper"],
+    (80, 145, 245),
+  )
+
   def update_frame(frame_index: int) -> None:
+    nonlocal last_rendered_frame
+    frame_index = int(frame_index)
+    if last_rendered_frame == frame_index:
+      return
     frame = frame_by_index[int(frame_index)]
-    clear_scene()
-    seed_mesh = mesh_for(seed_cache, seed_context, frame.frame_index, frame.seed_motion_row)
-    paper_mesh = mesh_for(paper_cache, paper_context, frame.frame_index, frame.paper_raw_motion_row)
-    offsets = comparison_offsets()
+    clear_bvh_scene()
+    update_articulated_robot(seed_robot, seed_context, frame.seed_motion_row, offsets["seed"])
+    update_articulated_robot(
+      paper_robot,
+      paper_context,
+      frame.paper_raw_motion_row,
+      offsets["paper"],
+    )
     add_bvh_target("BVH full skeleton", frame.bvh_full_target, offsets["bvh"])
-    add_mesh("seed G1 CSV", seed_mesh, offsets["seed"], (80, 190, 115))
-    add_mesh("paper raw upper on seed lower", paper_mesh, offsets["paper"], (80, 145, 245))
     info_markdown.content = _format_info(frame, global_root=config.global_root)
+    last_rendered_frame = frame_index
 
   @frame_slider.on_update
   def _(event) -> None:
@@ -398,11 +530,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
   print(f"Viser seed-vs-paper-raw G1 viewer running on http://localhost:{config.port}")
   while True:
     if play_checkbox.value:
-      next_frame = int(frame_slider.value) + 1
-      if next_frame > max(frame_indices):
-        next_frame = min(frame_indices)
-      frame_slider.value = next_frame
-      update_frame(next_frame)
+      frame_slider.value = next_frame_index(int(frame_slider.value), frame_indices)
       time.sleep(1.0 / max(float(fps_slider.value), 1e-6))
     else:
       time.sleep(0.1)

@@ -97,3 +97,55 @@ def test_comparison_frames_include_raw_bvh_full_body_skeleton(tmp_path):
 
   assert frame.bvh_full_target.lower.left_leg.hip.shape == (3,)
   assert frame.bvh_full_target.upper.left_arm.shoulder.shape == (3,)
+
+
+def test_next_frame_index_wraps_playback_range():
+  from scripts.visualize_seed_vs_paper_raw_g1 import next_frame_index
+
+  frames = [250, 251, 252]
+
+  assert next_frame_index(250, frames) == 251
+  assert next_frame_index(251, frames) == 252
+  assert next_frame_index(252, frames) == 250
+  assert next_frame_index(999, frames) == 250
+
+
+def test_articulated_g1_pose_snapshot_updates_geom_transforms_not_meshes():
+  from scripts.visualize_seed_vs_paper_raw_g1 import (
+    LEFT_SHOULDER_PITCH_UPPER_INDEX,
+    UPPER_BODY_START,
+    _articulated_geom_pose_snapshot,
+  )
+  from scripts.visualize_seed_bvh_axes import _seed_g1_model_context
+
+  model, data, joint_qpos_addresses, visual_geom_ids = _seed_g1_model_context()
+  seed_row = [0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0, *([0.0] * len(G1_29DOF_JOINT_COLUMNS))]
+  moved_row = list(seed_row)
+  moved_row[7 + UPPER_BODY_START + LEFT_SHOULDER_PITCH_UPPER_INDEX] = 0.75
+
+  neutral = _articulated_geom_pose_snapshot(
+    model,
+    data,
+    joint_qpos_addresses,
+    visual_geom_ids,
+    seed_row,
+    offset=np.zeros(3),
+    global_root=False,
+  )
+  moved = _articulated_geom_pose_snapshot(
+    model,
+    data,
+    joint_qpos_addresses,
+    visual_geom_ids,
+    moved_row,
+    offset=np.zeros(3),
+    global_root=False,
+  )
+
+  assert neutral.geom_ids == moved.geom_ids
+  assert neutral.positions.shape == moved.positions.shape == (len(visual_geom_ids), 3)
+  assert neutral.wxyzs.shape == moved.wxyzs.shape == (len(visual_geom_ids), 4)
+  assert any(
+    not np.allclose(lhs, rhs)
+    for lhs, rhs in zip(neutral.positions, moved.positions)
+  )
