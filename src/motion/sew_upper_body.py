@@ -48,7 +48,21 @@ class UpperBodyRetargetResult:
 
 
 class G1UpperBodySEWRetargeter:
-  """Retarget SOMA upper-body targets to G1 waist and bilateral arm joints."""
+  """Retarget SOMA upper-body targets to G1 waist and bilateral arm joints.
+
+  Scope vs the paper: only the per-arm axis groups use the closed-form
+  Subproblem 2 selection from ``sew_mimic``. The waist (chest orientation)
+  group and both wrist groups are solved numerically with
+  ``scipy.optimize.least_squares``. The ``branch_v2`` algorithm additionally
+  reflects four joint angles through the nearest joint-limit boundary as a
+  post-processing step; that step has no analogue in the paper.
+
+  Each ``ArmKeypointTarget`` is consumed as a direction-only target. Loaders
+  that synthesize G1 axis proxy targets (see
+  ``synthesize_g1_axis_proxy_arm_target``) can drive this solver to a zero
+  axis residual against a reachable robot pose, but the resulting joint
+  angles do not preserve the human's physical shoulder-to-elbow direction.
+  """
 
   def __init__(
     self,
@@ -221,7 +235,6 @@ class G1UpperBodySEWRetargeter:
     desired_orientation: np.ndarray,
   ) -> np.ndarray:
     indexes = np.arange(group.start or 0, group.stop or len(q))
-    bounds = (self.joint_limits[indexes, 0], self.joint_limits[indexes, 1])
     desired = np.asarray(desired_orientation, dtype=float).reshape(3, 3)
 
     def residual(values: np.ndarray) -> np.ndarray:
@@ -234,7 +247,7 @@ class G1UpperBodySEWRetargeter:
     result = least_squares(
       residual,
       q[indexes],
-      bounds=bounds,
+      **self._least_squares_limit_kwargs(indexes),
       xtol=1e-11,
       ftol=1e-11,
       gtol=1e-11,
@@ -332,7 +345,6 @@ class G1UpperBodySEWRetargeter:
     desired_hand_orientation: np.ndarray,
   ) -> np.ndarray:
     indexes = np.arange(group.start or 0, group.stop or len(q))
-    bounds = (self.joint_limits[indexes, 0], self.joint_limits[indexes, 1])
     desired = np.asarray(desired_hand_orientation, dtype=float).reshape(3, 3)
 
     def residual(values: np.ndarray) -> np.ndarray:
@@ -345,7 +357,7 @@ class G1UpperBodySEWRetargeter:
     result = least_squares(
       residual,
       q[indexes],
-      bounds=bounds,
+      **self._least_squares_limit_kwargs(indexes),
       xtol=1e-11,
       ftol=1e-11,
       gtol=1e-11,
@@ -354,6 +366,16 @@ class G1UpperBodySEWRetargeter:
     solved = q.copy()
     solved[indexes] = result.x
     return self._clip_joint_angles(solved)
+
+  def _least_squares_limit_kwargs(self, indexes: np.ndarray) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    if not self.algorithm_config.respect_joint_limits:
+      return {}
+    return {
+      "bounds": (
+        self.joint_limits[indexes, 0],
+        self.joint_limits[indexes, 1],
+      )
+    }
 
   def _diagnostics(self, q: np.ndarray, target: UpperBodyTarget) -> dict[str, float]:
     self._set_upper_body_joint_angles(q)

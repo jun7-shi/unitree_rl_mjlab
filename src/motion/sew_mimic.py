@@ -45,6 +45,14 @@ PAPER_V1_ALGORITHM = SEWAlgorithmConfig(
   branch_preserving=False,
   respect_joint_limits=False,
 )
+"""Closed-form branch selection that matches the paper's geometric solver.
+
+``paper_v1`` only describes the candidate-selection rule used by
+Subproblem 1/2/4 axis solves. The wrist subgroup is still solved with a
+numerical least-squares step (see ``_solve_wrist_group``), so even with
+``paper_v1`` selected the full pipeline is not a strict closed-form
+reproduction of every joint group.
+"""
 BRANCH_V2_ALGORITHM = SEWAlgorithmConfig(
   name="branch_v2",
   error_tolerance=1e-3,
@@ -382,7 +390,25 @@ def solve_two_axis_rotation(
 
 @dataclass(frozen=True)
 class ArmKeypointTarget:
-  """SEW-Mimic input target for one arm, suitable for future mocap parsers."""
+  """SEW-Mimic input target for one arm.
+
+  The shoulder/elbow/wrist fields carry one of two semantically distinct
+  payloads depending on the producer:
+
+  * Human keypoint target: real shoulder/elbow/wrist positions extracted from
+    BVH or MediaPipe. ``elbow - shoulder`` matches the human's upper-arm
+    direction. This is the paper-defined input.
+  * G1 axis proxy target: synthesized via
+    ``synthesize_g1_axis_proxy_arm_target`` (BVH/webcam) or
+    ``target_from_configuration`` (G1 FK). ``elbow - shoulder`` matches the
+    G1 third joint axis direction, not the human upper-arm direction. This
+    is an engineering adapter that lets the closed-form solver hit zero
+    residual against a reachable robot pose; it is NOT the paper input.
+
+  Consumers of this dataclass must decide which semantics they expect. The
+  closed-form solver in ``G1SEWMimicRetargeter`` treats it as a direction
+  target only and does not distinguish between the two.
+  """
 
   shoulder: np.ndarray
   elbow: np.ndarray
@@ -489,7 +515,20 @@ class G1SEWMimicRetargeter:
     wrist: ArrayLike3,
     hand_orientation: np.ndarray,
   ) -> SEWMimicResult:
-    """Retarget one G1 arm from SEW keypoints and desired hand orientation."""
+    """Retarget one G1 arm from SEW keypoints and desired hand orientation.
+
+    Note on scope: this solver matches the paper for the two axis groups
+    (Subproblem 2 closed-form selection between upper/lower arm direction
+    candidates). The wrist subgroup is solved numerically with
+    ``scipy.optimize.least_squares`` rather than closed-form, so the
+    returned ``joint_angles`` are paper-faithful for joints 0-3 only.
+
+    The ``shoulder``/``elbow``/``wrist`` inputs are interpreted as a
+    direction pair: only ``elbow - shoulder`` and ``wrist - elbow``
+    matter. Pass either human keypoints or a G1 axis proxy target depending
+    on whether you want paper semantics or zero-residual reachability (see
+    ``ArmKeypointTarget``).
+    """
     q = self._clip_joint_angles(np.asarray(q_init, dtype=float))
     if q.shape != (7,):
       raise ValueError(f"q_init must have shape (7,), got {q.shape}")
@@ -603,10 +642,6 @@ class G1SEWMimicRetargeter:
     desired_hand_orientation: np.ndarray,
   ) -> np.ndarray:
     indexes = np.arange(group.start or 0, group.stop or len(q))
-    bounds = (
-      self.joint_limits[indexes, 0],
-      self.joint_limits[indexes, 1],
-    )
 
     def residual(values: np.ndarray) -> np.ndarray:
       candidate = q.copy()
@@ -618,7 +653,7 @@ class G1SEWMimicRetargeter:
     result = least_squares(
       residual,
       q[indexes],
-      bounds=bounds,
+      **self._least_squares_limit_kwargs(indexes),
       xtol=1e-11,
       ftol=1e-11,
       gtol=1e-11,
@@ -627,6 +662,16 @@ class G1SEWMimicRetargeter:
     solved = q.copy()
     solved[indexes] = result.x
     return self._clip_joint_angles(solved)
+
+  def _least_squares_limit_kwargs(self, indexes: np.ndarray) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    if not self.algorithm_config.respect_joint_limits:
+      return {}
+    return {
+      "bounds": (
+        self.joint_limits[indexes, 0],
+        self.joint_limits[indexes, 1],
+      )
+    }
 
   def _diagnostics(
     self,

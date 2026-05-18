@@ -89,6 +89,39 @@ def test_paper_v1_tracks_continuous_raw_left_shoulder_sew_branch_without_limit_p
   assert np.max(np.abs(np.diff(left_shoulder_pitch_roll, axis=0))) <= 15.0
 
 
+def test_paper_v1_wrist_solver_does_not_apply_g1_limits_before_final_processing():
+  retargeter = G1UpperBodySEWRetargeter(algorithm_version="paper_v1")
+  q_target = np.zeros(17, dtype=float)
+  q_target[10:17] = np.deg2rad(
+    [
+      362.31359148,
+      -18.94043648,
+      -340.91519644,
+      -49.48623630,
+      -36.53660000,
+      -16.49030000,
+      -38.55870000,
+    ]
+  )
+  target = retargeter.target_from_configuration(q_target)
+  q_init = q_target.copy()
+  q_init[14:17] = np.array(
+    [
+      retargeter.joint_limits[14, 0] + 1e-6,
+      retargeter.joint_limits[15, 0] + 1e-6,
+      retargeter.joint_limits[16, 1] - 1e-6,
+    ],
+    dtype=float,
+  )
+
+  result = retargeter.retarget(q_init, target)
+
+  assert result.errors["right_wrist"] <= 1e-8
+  assert result.joint_angles[14] < retargeter.joint_limits[14, 0]
+  assert result.joint_angles[15] < retargeter.joint_limits[15, 0]
+  assert result.joint_angles[16] > retargeter.joint_limits[16, 1]
+
+
 def test_branch_v2_reflects_out_of_range_shoulder_branch_without_degrading_wrist_branch():
   bvh_path = (
     Path("/data/jun7.shi/datasets/bones-seed/soma_uniform/bvh/231006")
