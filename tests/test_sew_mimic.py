@@ -3,6 +3,7 @@ import math
 import numpy as np
 import pytest
 
+import src.motion.sew_mimic as sew_mimic
 from src.motion.sew_mimic import (
   G1SEWMimicRetargeter,
   candidate_sort_key,
@@ -102,6 +103,29 @@ def test_g1_retargeter_recovers_targets_generated_from_reachable_pose():
   assert result.upper_arm_error <= 1e-3
   assert result.lower_arm_error <= 1e-3
   assert result.wrist_error <= 1e-3
+
+
+def test_g1_paper_v1_wrist_alignment_is_closed_form_for_perpendicular_wrist(monkeypatch):
+  def fail_if_called(*_args, **_kwargs):
+    raise AssertionError("wrist alignment should not call least_squares")
+
+  monkeypatch.setattr(sew_mimic, "least_squares", fail_if_called)
+  retargeter = G1SEWMimicRetargeter(side="left", algorithm_version="paper_v1")
+  q_init = np.zeros(7)
+  q_target = np.array([0.2, 0.35, -0.45, 0.9, 0.25, -0.35, 0.4])
+  target = retargeter.target_from_configuration(q_target)
+
+  result = retargeter.retarget(
+    q_init,
+    shoulder=target.shoulder,
+    elbow=target.elbow,
+    wrist=target.wrist,
+    hand_orientation=target.hand_orientation,
+  )
+
+  assert result.success
+  np.testing.assert_allclose(result.joint_angles[4:7], q_target[4:7], atol=1e-6)
+  assert result.wrist_error <= 1e-8
 
 
 def test_retarget_motion_rows_from_targets_updates_g1_arm_columns_for_mocap_handoff():

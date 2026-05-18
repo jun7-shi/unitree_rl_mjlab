@@ -23,6 +23,7 @@ from src.motion.sew_mimic import (
   rotation_vector_from_matrix,
   resolve_sew_algorithm_config,
   select_limit_projected_sew_candidate,
+  solve_g1_perpendicular_wrist_angles,
   solve_two_axis_rotation,
 )
 
@@ -50,12 +51,13 @@ class UpperBodyRetargetResult:
 class G1UpperBodySEWRetargeter:
   """Retarget SOMA upper-body targets to G1 waist and bilateral arm joints.
 
-  Scope vs the paper: only the per-arm axis groups use the closed-form
-  Subproblem 2 selection from ``sew_mimic``. The waist (chest orientation)
-  group and both wrist groups are solved numerically with
-  ``scipy.optimize.least_squares``. The ``branch_v2`` algorithm additionally
-  reflects four joint angles through the nearest joint-limit boundary as a
-  post-processing step; that step has no analogue in the paper.
+  Scope vs the paper: the per-arm axis groups use the closed-form
+  Subproblem 2 selection from ``sew_mimic`` and the G1 perpendicular wrists
+  use the paper appendix's Euler decomposition. The waist (chest orientation)
+  group is still solved numerically with ``scipy.optimize.least_squares``.
+  The ``branch_v2`` algorithm additionally reflects four joint angles through
+  the nearest joint-limit boundary as a post-processing step; that step has no
+  analogue in the paper.
 
   Each ``ArmKeypointTarget`` is consumed as a direction-only target. Loaders
   that synthesize G1 axis proxy targets (see
@@ -331,6 +333,25 @@ class G1UpperBodySEWRetargeter:
       for b in second_values
     ]
 
+  def _bounded_angle_triplet_candidates(
+    self,
+    indexes: np.ndarray,
+    values: Sequence[float],
+  ) -> list[tuple[np.ndarray, bool]]:
+    candidates = [
+      self._bounded_equivalent_angle_candidates(float(value), int(index))
+      for value, index in zip(values, indexes)
+    ]
+    return [
+      (
+        np.array([first.angle, second.angle, third.angle], dtype=float),
+        first.clipped or second.clipped or third.clipped,
+      )
+      for first in candidates[0]
+      for second in candidates[1]
+      for third in candidates[2]
+    ]
+
   def _bounded_equivalent_angle_candidates(self, angle: float, joint_index: int):
     return bounded_equivalent_angle_candidates(angle, self.joint_limits, joint_index, config=self.algorithm_config)
 
@@ -346,26 +367,31 @@ class G1UpperBodySEWRetargeter:
   ) -> np.ndarray:
     indexes = np.arange(group.start or 0, group.stop or len(q))
     desired = np.asarray(desired_hand_orientation, dtype=float).reshape(3, 3)
+    wrist_zero = q.copy()
+    wrist_zero[indexes] = 0.0
+    self._set_upper_body_joint_angles(wrist_zero)
+    zero_orientation = self.data.site_xmat[site_id].reshape(3, 3).copy()
+    relative_desired = zero_orientation.T @ desired
 
-    def residual(values: np.ndarray) -> np.ndarray:
-      candidate = q.copy()
-      candidate[indexes] = values
-      self._set_upper_body_joint_angles(candidate)
-      current = self.data.site_xmat[site_id].reshape(3, 3)
-      return rotation_vector_from_matrix(desired @ current.T)
+    scored_candidates: list[tuple[np.ndarray, tuple[float, float], float, bool]] = []
+    for euler_values in solve_g1_perpendicular_wrist_angles(relative_desired):
+      for values, clipped in self._bounded_angle_triplet_candidates(indexes, euler_values):
+        candidate_q = q.copy()
+        candidate_q[indexes] = values
+        self._set_upper_body_joint_angles(candidate_q)
+        current = self.data.site_xmat[site_id].reshape(3, 3)
+        joint_distance = float(np.linalg.norm(candidate_q[indexes] - q[indexes]))
+        score = candidate_sort_key(
+          axis_error=matrix_orientation_error(current, desired),
+          joint_distance=joint_distance,
+          error_tolerance=self.algorithm_config.error_tolerance,
+        )
+        scored_candidates.append((candidate_q, score, joint_distance, clipped))
 
-    result = least_squares(
-      residual,
-      q[indexes],
-      **self._least_squares_limit_kwargs(indexes),
-      xtol=1e-11,
-      ftol=1e-11,
-      gtol=1e-11,
-      max_nfev=300,
-    )
-    solved = q.copy()
-    solved[indexes] = result.x
-    return self._clip_joint_angles(solved)
+    best_q = select_limit_projected_sew_candidate(scored_candidates, config=self.algorithm_config)
+    if best_q is not None:
+      return self._clip_joint_angles(best_q)
+    return self._clip_joint_angles(q)
 
   def _least_squares_limit_kwargs(self, indexes: np.ndarray) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     if not self.algorithm_config.respect_joint_limits:

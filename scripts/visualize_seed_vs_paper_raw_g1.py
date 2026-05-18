@@ -16,7 +16,6 @@ if str(REPO_ROOT) not in sys.path:
 
 from scripts.visualize_seed_bvh_axes import (
   MeshSnapshot,
-  _axis_segments,
   _load_seed_motion_rows,
   _seed_g1_model_context,
   _seed_g1_shoulder_center,
@@ -25,13 +24,16 @@ from scripts.visualize_seed_bvh_axes import (
 from src.motion.bvh_full_body import load_soma_bvh_full_body_targets
 from src.motion.bvh_upper_body import load_soma_bvh_upper_body_targets
 from src.motion.sew_full_body import FullBodyTarget
-from src.motion.sew_mimic import PAPER_V1_ALGORITHM
+from src.motion.sew_mimic import PAPER_V1_ALGORITHM, normalize
 from src.motion.sew_upper_body import G1UpperBodySEWRetargeter
 
 
 UPPER_BODY_START = 12
 UPPER_BODY_DOF = 17
 LEFT_SHOULDER_PITCH_UPPER_INDEX = 3
+BODY_CENTRIC_DISPLAY_MODE = "body-centric"
+WORLD_DISPLAY_MODE = "world"
+DISPLAY_MODES = (BODY_CENTRIC_DISPLAY_MODE, WORLD_DISPLAY_MODE)
 
 
 @dataclass(frozen=True)
@@ -42,11 +44,15 @@ class VisualizerConfig:
   end_frame: int | None = None
   port: int = 8090
   fps: float = 10.0
-  global_root: bool = False
+  display_mode: str = BODY_CENTRIC_DISPLAY_MODE
   paper_raw_offset_to_seed: bool = False
   apply_orientation_offsets: bool = True
   align_upper_arm_axes_to_g1: bool = True
   remove_initial_heading: bool = True
+
+  def __post_init__(self) -> None:
+    if self.display_mode not in DISPLAY_MODES:
+      raise ValueError(f"display_mode must be one of {DISPLAY_MODES}, got {self.display_mode!r}")
 
 
 @dataclass(frozen=True)
@@ -229,12 +235,15 @@ def _articulated_geom_pose_snapshot(
   row: Sequence[float],
   *,
   offset: np.ndarray,
-  global_root: bool,
+  display_mode: str,
 ) -> ArticulatedGeomPoseSnapshot:
-  motion_row = list(row) if global_root else _body_frame_row(row)
+  if display_mode not in DISPLAY_MODES:
+    raise ValueError(f"display_mode must be one of {DISPLAY_MODES}, got {display_mode!r}")
+  body_centric = display_mode == BODY_CENTRIC_DISPLAY_MODE
+  motion_row = _body_frame_row(row) if body_centric else list(row)
   _set_qpos_from_seed_motion_row(data, joint_qpos_addresses, motion_row)
   mujoco.mj_forward(model, data)
-  center = _seed_g1_shoulder_center(model, data)
+  center = _seed_g1_shoulder_center(model, data) if body_centric else np.zeros(3)
   geom_id_tuple = tuple(int(geom_id) for geom_id in geom_ids)
   return ArticulatedGeomPoseSnapshot(
     geom_ids=geom_id_tuple,
@@ -272,22 +281,23 @@ def _mesh_snapshot_from_motion_row(
   visual_geom_ids: Sequence[int],
   row: Sequence[float],
   *,
-  global_root: bool,
+  display_mode: str,
 ) -> MeshSnapshot:
   from mjlab.viewer.viser.conversions import merge_geoms_global
 
-  motion_row = list(row) if global_root else _body_frame_row(row)
+  body_centric = display_mode == BODY_CENTRIC_DISPLAY_MODE
+  motion_row = _body_frame_row(row) if body_centric else list(row)
   _set_qpos_from_seed_motion_row(data, joint_qpos_addresses, motion_row)
   mujoco.mj_forward(model, data)
   mesh = merge_geoms_global(model, data, list(visual_geom_ids))
-  center = _seed_g1_shoulder_center(model, data)
+  center = _seed_g1_shoulder_center(model, data) if body_centric else np.zeros(3)
   return MeshSnapshot(
     vertices=np.asarray(mesh.vertices, dtype=float) - center,
     faces=np.asarray(mesh.faces, dtype=np.int32),
   )
 
 
-def _format_info(frame: ComparisonFrame, *, global_root: bool) -> str:
+def _format_info(frame: ComparisonFrame, *, display_mode: str) -> str:
   return (
     f"**Frame:** {frame.frame_index}  **CSV Frame:** {frame.csv_frame}<br>"
     f"**Root/lower body:** copied from seed CSV for both robots<br>"
@@ -295,7 +305,7 @@ def _format_info(frame: ComparisonFrame, *, global_root: bool) -> str:
     f"no G1 upper-arm axis flip, no lower-body offsets<br>"
     f"**Green column:** seed G1 CSV full pose<br>"
     f"**Blue column:** paper_v1 raw upper-body retarget on seed root/lower-body<br>"
-    f"**Render root:** {'CSV global root' if global_root else 'body-frame root'}<br><br>"
+    f"**Display mode:** {display_mode}<br><br>"
     f"**seed left shoulder pitch:** {frame.seed_left_shoulder_pitch_deg:.3f} deg<br>"
     f"**paper raw left shoulder pitch:** {frame.paper_raw_left_shoulder_pitch_deg:.3f} deg<br>"
     f"**displayed paper pitch:** {frame.displayed_left_shoulder_pitch_deg:.3f} deg "
@@ -329,8 +339,16 @@ def _bvh_full_origin(target: FullBodyTarget) -> np.ndarray:
   return 0.5 * (target.upper.left_arm.shoulder + target.upper.right_arm.shoulder)
 
 
-def _full_bvh_segments(target: FullBodyTarget, offset: np.ndarray) -> np.ndarray:
-  origin = _bvh_full_origin(target)
+def _bvh_display_origin(target: FullBodyTarget, display_mode: str) -> np.ndarray:
+  if display_mode == BODY_CENTRIC_DISPLAY_MODE:
+    return _bvh_full_origin(target)
+  if display_mode == WORLD_DISPLAY_MODE:
+    return np.zeros(3)
+  raise ValueError(f"display_mode must be one of {DISPLAY_MODES}, got {display_mode!r}")
+
+
+def _full_bvh_segments(target: FullBodyTarget, offset: np.ndarray, *, display_mode: str) -> np.ndarray:
+  origin = _bvh_display_origin(target, display_mode)
 
   def p(value: np.ndarray) -> np.ndarray:
     return np.asarray(value, dtype=float) - origin + offset
@@ -356,8 +374,8 @@ def _full_bvh_segments(target: FullBodyTarget, offset: np.ndarray) -> np.ndarray
   return np.asarray([[p(start), p(end)] for start, end in segments], dtype=float)
 
 
-def _full_bvh_points(target: FullBodyTarget, offset: np.ndarray) -> np.ndarray:
-  origin = _bvh_full_origin(target)
+def _full_bvh_points(target: FullBodyTarget, offset: np.ndarray, *, display_mode: str) -> np.ndarray:
+  origin = _bvh_display_origin(target, display_mode)
   upper = target.upper
   lower = target.lower
   points = [
@@ -378,11 +396,45 @@ def _full_bvh_points(target: FullBodyTarget, offset: np.ndarray) -> np.ndarray:
   return np.asarray([np.asarray(point, dtype=float) - origin + offset for point in points])
 
 
-def _bvh_display_snapshot(target: FullBodyTarget, offset: np.ndarray) -> BvhDisplaySnapshot:
+def _full_bvh_axis_segments(
+  target: FullBodyTarget,
+  offset: np.ndarray,
+  *,
+  display_mode: str,
+  axis_length: float,
+) -> np.ndarray:
+  origin = _bvh_display_origin(target, display_mode)
+
+  def p(value: np.ndarray) -> np.ndarray:
+    return np.asarray(value, dtype=float) - origin + offset
+
+  upper = target.upper
+  left_upper = normalize(upper.left_arm.elbow - upper.left_arm.shoulder)
+  left_lower = normalize(upper.left_arm.wrist - upper.left_arm.elbow)
+  right_upper = normalize(upper.right_arm.elbow - upper.right_arm.shoulder)
+  right_lower = normalize(upper.right_arm.wrist - upper.right_arm.elbow)
+  starts_and_axes = [
+    (upper.left_arm.shoulder, left_upper),
+    (upper.left_arm.elbow, left_lower),
+    (upper.right_arm.shoulder, right_upper),
+    (upper.right_arm.elbow, right_lower),
+  ]
+  return np.asarray(
+    [[p(start), p(start + axis * axis_length)] for start, axis in starts_and_axes],
+    dtype=float,
+  )
+
+
+def _bvh_display_snapshot(target: FullBodyTarget, offset: np.ndarray, *, display_mode: str) -> BvhDisplaySnapshot:
   return BvhDisplaySnapshot(
-    skeleton_segments=_full_bvh_segments(target, offset),
-    axis_segments=_axis_segments(target.upper, offset, 0.18),
-    keypoints=_full_bvh_points(target, offset),
+    skeleton_segments=_full_bvh_segments(target, offset, display_mode=display_mode),
+    axis_segments=_full_bvh_axis_segments(
+      target,
+      offset,
+      display_mode=display_mode,
+      axis_length=0.18,
+    ),
+    keypoints=_full_bvh_points(target, offset, display_mode=display_mode),
   )
 
 
@@ -431,7 +483,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
       visual_geom_ids,
       row,
       offset=offset,
-      global_root=config.global_root,
+      display_mode=config.display_mode,
     )
     mesh_handles = []
     for pose_index, geom_id in enumerate(pose.geom_ids):
@@ -468,14 +520,14 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
       handles.geom_ids,
       row,
       offset=offset,
-      global_root=config.global_root,
+      display_mode=config.display_mode,
     )
     for handle, position, wxyz in zip(handles.mesh_handles, pose.positions, pose.wxyzs):
       handle.position = position
       handle.wxyz = wxyz
 
   def add_bvh_target(name: str, target: FullBodyTarget, offset: np.ndarray) -> BvhDisplayHandles:
-    snapshot = _bvh_display_snapshot(target, offset)
+    snapshot = _bvh_display_snapshot(target, offset, display_mode=config.display_mode)
     skeleton_handle = server.scene.add_line_segments(
         f"/{name}/skeleton",
         points=snapshot.skeleton_segments,
@@ -514,7 +566,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
     target: FullBodyTarget,
     offset: np.ndarray,
   ) -> None:
-    snapshot = _bvh_display_snapshot(target, offset)
+    snapshot = _bvh_display_snapshot(target, offset, display_mode=config.display_mode)
     handles.skeleton_handle.points = snapshot.skeleton_segments
     handles.axes_handle.points = snapshot.axis_segments
     handles.keypoints_handle.points = snapshot.keypoints
@@ -550,7 +602,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
       frame.paper_raw_motion_row,
       offsets["paper"],
     )
-    info_markdown.content = _format_info(frame, global_root=config.global_root)
+    info_markdown.content = _format_info(frame, display_mode=config.display_mode)
     last_rendered_frame = frame_index
 
   @frame_slider.on_update
@@ -591,6 +643,12 @@ def build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument("--port", type=int, default=8090, help="Viser web server port.")
   parser.add_argument("--fps", type=float, default=10.0, help="Autoplay FPS.")
   parser.add_argument(
+    "--display-mode",
+    choices=DISPLAY_MODES,
+    default=BODY_CENTRIC_DISPLAY_MODE,
+    help="body-centric keeps poses centered for comparison; world preserves BVH/CSV root translation.",
+  )
+  parser.add_argument(
     "--paper-raw-offset-to-seed",
     action="store_true",
     help="Display paper raw left_shoulder_pitch after adding k*360 to the seed angle neighborhood.",
@@ -598,12 +656,18 @@ def build_arg_parser() -> argparse.ArgumentParser:
   parser.add_argument(
     "--global-root",
     action="store_true",
-    help="Render the CSV root pose. By default both robots are shown in body-frame root for easier side-by-side comparison.",
+    help="Deprecated alias for --display-mode world.",
   )
   parser.add_argument("--raw-orientations", action="store_true", help="Disable SOMA-to-G1 orientation offsets.")
   parser.add_argument("--raw-upper-arm-axes", action="store_true", help="Disable upper-arm G1 convention flip.")
   parser.add_argument("--keep-global-heading", action="store_true", help="Keep the BVH initial heading.")
   return parser
+
+
+def display_mode_from_args(args: argparse.Namespace) -> str:
+  if getattr(args, "global_root", False):
+    return WORLD_DISPLAY_MODE
+  return str(args.display_mode)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -615,7 +679,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     end_frame=args.end_frame,
     port=args.port,
     fps=args.fps,
-    global_root=args.global_root,
+    display_mode=display_mode_from_args(args),
     paper_raw_offset_to_seed=args.paper_raw_offset_to_seed,
     apply_orientation_offsets=not args.raw_orientations,
     align_upper_arm_axes_to_g1=not args.raw_upper_arm_axes,

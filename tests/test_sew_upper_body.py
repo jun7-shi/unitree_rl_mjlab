@@ -3,6 +3,7 @@ from pathlib import Path
 import numpy as np
 import pytest
 
+import src.motion.sew_upper_body as sew_upper_body
 from src.motion.bvh_full_body import load_soma_bvh_full_body_targets
 from src.motion.sew_mimic import (
   bounded_equivalent_angles,
@@ -120,6 +121,28 @@ def test_paper_v1_wrist_solver_does_not_apply_g1_limits_before_final_processing(
   assert result.joint_angles[14] < retargeter.joint_limits[14, 0]
   assert result.joint_angles[15] < retargeter.joint_limits[15, 0]
   assert result.joint_angles[16] > retargeter.joint_limits[16, 1]
+
+
+def test_upper_body_paper_v1_wrist_alignment_is_closed_form_for_g1_perpendicular_wrist(monkeypatch):
+  def fail_if_called(*_args, **_kwargs):
+    raise AssertionError("wrist alignment should not call least_squares")
+
+  monkeypatch.setattr(sew_upper_body, "least_squares", fail_if_called)
+  retargeter = G1UpperBodySEWRetargeter(algorithm_version="paper_v1")
+  q_target = np.zeros(17)
+  q_target[3:10] = np.array([0.2, 0.35, -0.45, 0.9, 0.25, -0.35, 0.4])
+  target = retargeter.target_from_configuration(q_target)
+  q_init = q_target.copy()
+  q_init[7:10] = 0.0
+
+  result = retargeter._solve_wrist_group(
+    q_init,
+    slice(7, 10),
+    retargeter._palm_site_ids["left"],
+    target.left_arm.hand_orientation,
+  )
+
+  np.testing.assert_allclose(result[7:10], q_target[7:10], atol=1e-6)
 
 
 def test_branch_v2_reflects_out_of_range_shoulder_branch_without_degrading_wrist_branch():

@@ -7,6 +7,7 @@ from typing import Iterable, Sequence
 import mujoco
 import numpy as np
 from scipy.optimize import least_squares
+from scipy.spatial.transform import Rotation
 
 from src import SRC_PATH
 from src.motion.seed_bones import G1_29DOF_JOINT_COLUMNS
@@ -47,11 +48,10 @@ PAPER_V1_ALGORITHM = SEWAlgorithmConfig(
 )
 """Closed-form branch selection that matches the paper's geometric solver.
 
-``paper_v1`` only describes the candidate-selection rule used by
-Subproblem 1/2/4 axis solves. The wrist subgroup is still solved with a
-numerical least-squares step (see ``_solve_wrist_group``), so even with
-``paper_v1`` selected the full pipeline is not a strict closed-form
-reproduction of every joint group.
+``paper_v1`` describes the candidate-selection rule used by Subproblem
+1/2/4 axis solves. For G1, the final three wrist joints use the paper
+appendix's perpendicular-wrist Euler decomposition rather than a numerical
+optimizer.
 """
 BRANCH_V2_ALGORITHM = SEWAlgorithmConfig(
   name="branch_v2",
@@ -388,6 +388,18 @@ def solve_two_axis_rotation(
   )
 
 
+def solve_g1_perpendicular_wrist_angles(desired_relative_orientation: np.ndarray) -> list[np.ndarray]:
+  """Return G1 wrist XYZ Euler candidates for the paper's perpendicular-wrist case.
+
+  G1's final three wrist joints are X/Y/Z hinges. The paper appendix states
+  perpendicular wrists should be solved by Euler decomposition instead of the
+  Subproblem 1/2 parallel-wrist routine.
+  """
+  euler = Rotation.from_matrix(np.asarray(desired_relative_orientation, dtype=float).reshape(3, 3)).as_euler("XYZ")
+  equivalent = np.array([euler[0] + np.pi, np.pi - euler[1], euler[2] + np.pi], dtype=float)
+  return [np.asarray(euler, dtype=float), equivalent]
+
+
 @dataclass(frozen=True)
 class ArmKeypointTarget:
   """SEW-Mimic input target for one arm.
@@ -519,9 +531,8 @@ class G1SEWMimicRetargeter:
 
     Note on scope: this solver matches the paper for the two axis groups
     (Subproblem 2 closed-form selection between upper/lower arm direction
-    candidates). The wrist subgroup is solved numerically with
-    ``scipy.optimize.least_squares`` rather than closed-form, so the
-    returned ``joint_angles`` are paper-faithful for joints 0-3 only.
+    candidates) and uses the paper appendix's G1 perpendicular-wrist Euler
+    decomposition for the final three wrist joints.
 
     The ``shoulder``/``elbow``/``wrist`` inputs are interpreted as a
     direction pair: only ``elbow - shoulder`` and ``wrist - elbow``
@@ -629,6 +640,25 @@ class G1SEWMimicRetargeter:
       for b in second_values
     ]
 
+  def _bounded_angle_triplet_candidates(
+    self,
+    indexes: np.ndarray,
+    values: Sequence[float],
+  ) -> list[tuple[np.ndarray, bool]]:
+    candidates = [
+      self._bounded_equivalent_angle_candidates(float(value), int(index))
+      for value, index in zip(values, indexes)
+    ]
+    return [
+      (
+        np.array([first.angle, second.angle, third.angle], dtype=float),
+        first.clipped or second.clipped or third.clipped,
+      )
+      for first in candidates[0]
+      for second in candidates[1]
+      for third in candidates[2]
+    ]
+
   def _bounded_equivalent_angle_candidates(self, angle: float, joint_index: int) -> list[BoundedAngleCandidate]:
     return bounded_equivalent_angle_candidates(angle, self.joint_limits, joint_index, config=self.algorithm_config)
 
@@ -642,26 +672,32 @@ class G1SEWMimicRetargeter:
     desired_hand_orientation: np.ndarray,
   ) -> np.ndarray:
     indexes = np.arange(group.start or 0, group.stop or len(q))
+    desired = np.asarray(desired_hand_orientation, dtype=float).reshape(3, 3)
+    wrist_zero = q.copy()
+    wrist_zero[indexes] = 0.0
+    self._set_arm_joint_angles(wrist_zero)
+    zero_orientation = self.data.site_xmat[self._palm_site_id].reshape(3, 3).copy()
+    relative_desired = zero_orientation.T @ desired
 
-    def residual(values: np.ndarray) -> np.ndarray:
-      candidate = q.copy()
-      candidate[indexes] = values
-      self._set_arm_joint_angles(candidate)
-      current = self.data.site_xmat[self._palm_site_id].reshape(3, 3)
-      return rotation_vector_from_matrix(desired_hand_orientation @ current.T)
+    scored_candidates: list[tuple[np.ndarray, tuple[float, float], float, bool]] = []
+    for euler_values in solve_g1_perpendicular_wrist_angles(relative_desired):
+      for values, clipped in self._bounded_angle_triplet_candidates(indexes, euler_values):
+        candidate_q = q.copy()
+        candidate_q[indexes] = values
+        self._set_arm_joint_angles(candidate_q)
+        current = self.data.site_xmat[self._palm_site_id].reshape(3, 3)
+        joint_distance = float(np.linalg.norm(candidate_q[indexes] - q[indexes]))
+        score = candidate_sort_key(
+          axis_error=matrix_orientation_error(current, desired),
+          joint_distance=joint_distance,
+          error_tolerance=self.algorithm_config.error_tolerance,
+        )
+        scored_candidates.append((candidate_q, score, joint_distance, clipped))
 
-    result = least_squares(
-      residual,
-      q[indexes],
-      **self._least_squares_limit_kwargs(indexes),
-      xtol=1e-11,
-      ftol=1e-11,
-      gtol=1e-11,
-      max_nfev=300,
-    )
-    solved = q.copy()
-    solved[indexes] = result.x
-    return self._clip_joint_angles(solved)
+    best_q = select_limit_projected_sew_candidate(scored_candidates, config=self.algorithm_config)
+    if best_q is not None:
+      return self._clip_joint_angles(best_q)
+    return self._clip_joint_angles(q)
 
   def _least_squares_limit_kwargs(self, indexes: np.ndarray) -> dict[str, tuple[np.ndarray, np.ndarray]]:
     if not self.algorithm_config.respect_joint_limits:
