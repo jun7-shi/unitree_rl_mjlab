@@ -127,7 +127,7 @@ def test_upper_body_paper_v1_wrist_alignment_is_closed_form_for_g1_perpendicular
   def fail_if_called(*_args, **_kwargs):
     raise AssertionError("wrist alignment should not call least_squares")
 
-  monkeypatch.setattr(sew_upper_body, "least_squares", fail_if_called)
+  monkeypatch.setattr(sew_upper_body, "least_squares", fail_if_called, raising=False)
   retargeter = G1UpperBodySEWRetargeter(algorithm_version="paper_v1")
   q_target = np.zeros(17)
   q_target[3:10] = np.array([0.2, 0.35, -0.45, 0.9, 0.25, -0.35, 0.4])
@@ -143,6 +143,69 @@ def test_upper_body_paper_v1_wrist_alignment_is_closed_form_for_g1_perpendicular
   )
 
   np.testing.assert_allclose(result[7:10], q_target[7:10], atol=1e-6)
+
+
+def test_upper_body_paper_v1_waist_alignment_is_closed_form_for_g1_waist(monkeypatch):
+  def fail_if_called(*_args, **_kwargs):
+    raise AssertionError("waist alignment should not call least_squares")
+
+  monkeypatch.setattr(sew_upper_body, "least_squares", fail_if_called, raising=False)
+  retargeter = G1UpperBodySEWRetargeter(algorithm_version="paper_v1")
+  q_target = np.zeros(17, dtype=float)
+  q_target[:3] = np.array([0.31, -0.22, 0.18])
+  target = retargeter.target_from_configuration(q_target)
+  q_init = q_target.copy()
+  q_init[:3] = 0.0
+
+  result = retargeter._solve_orientation_group(
+    q_init,
+    slice(0, 3),
+    retargeter._torso_body_id,
+    target.chest_orientation,
+  )
+
+  np.testing.assert_allclose(result[:3], q_target[:3], atol=1e-7)
+
+
+def test_paper_v1_upper_body_retarget_does_not_forward_every_equivalent_candidate(monkeypatch):
+  retargeter = G1UpperBodySEWRetargeter(algorithm_version="paper_v1")
+  q_target = np.array(
+    [
+      0.12,
+      0.08,
+      -0.10,
+      0.20,
+      0.35,
+      -0.45,
+      0.90,
+      0.25,
+      -0.35,
+      0.40,
+      -0.15,
+      -0.30,
+      0.35,
+      0.70,
+      -0.20,
+      0.25,
+      -0.30,
+    ],
+    dtype=float,
+  )
+  target = retargeter.target_from_configuration(q_target)
+  original_forward = sew_upper_body.mujoco.mj_forward
+  forward_count = 0
+
+  def counted_forward(model, data):
+    nonlocal forward_count
+    forward_count += 1
+    return original_forward(model, data)
+
+  monkeypatch.setattr(sew_upper_body.mujoco, "mj_forward", counted_forward)
+
+  result = retargeter.retarget(np.zeros(17), target)
+
+  assert result.success
+  assert forward_count <= 12
 
 
 def test_branch_v2_reflects_out_of_range_shoulder_branch_without_degrading_wrist_branch():

@@ -400,6 +400,37 @@ def solve_g1_perpendicular_wrist_angles(desired_relative_orientation: np.ndarray
   return [np.asarray(euler, dtype=float), equivalent]
 
 
+def solve_g1_waist_angles(desired_relative_orientation: np.ndarray, eps: float = 1e-9) -> list[np.ndarray]:
+  """Return G1 waist ZXY Euler candidates for yaw/roll/pitch joints.
+
+  G1's waist chain is ``Rz(yaw) @ Rx(roll) @ Ry(pitch)``. This is the same
+  Euler-decomposition style used by the paper appendix for perpendicular
+  wrists, applied to the three-axis torso chain instead of solving a numeric
+  orientation IK problem.
+  """
+  matrix = np.asarray(desired_relative_orientation, dtype=float).reshape(3, 3)
+  roll = float(np.arcsin(np.clip(matrix[2, 1], -1.0, 1.0)))
+  cos_roll = float(np.cos(roll))
+  if abs(cos_roll) > eps:
+    yaw = float(np.arctan2(-matrix[0, 1], matrix[1, 1]))
+    pitch = float(np.arctan2(-matrix[2, 0], matrix[2, 2]))
+    primary = np.array([yaw, roll, pitch], dtype=float)
+    equivalent = np.array([yaw + np.pi, np.pi - roll, pitch + np.pi], dtype=float)
+    return [primary, equivalent]
+
+  roll = float(np.pi / 2.0 if matrix[2, 1] >= 0.0 else -np.pi / 2.0)
+  yaw_minus_pitch = float(np.arctan2(matrix[1, 0], matrix[0, 0]))
+  if roll > 0.0:
+    return [
+      np.array([yaw_minus_pitch, roll, 0.0], dtype=float),
+      np.array([0.0, roll, yaw_minus_pitch], dtype=float),
+    ]
+  return [
+    np.array([yaw_minus_pitch, roll, 0.0], dtype=float),
+    np.array([0.0, roll, -yaw_minus_pitch], dtype=float),
+  ]
+
+
 @dataclass(frozen=True)
 class ArmKeypointTarget:
   """SEW-Mimic input target for one arm.

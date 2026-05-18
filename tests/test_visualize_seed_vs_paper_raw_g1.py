@@ -7,7 +7,11 @@ from pathlib import Path
 import numpy as np
 
 from src.motion.seed_bones import G1_29DOF_JOINT_COLUMNS
-from tests.test_bvh_full_body import _write_tiny_full_body_bvh, _write_turning_humanoid_full_body_bvh
+from tests.test_bvh_full_body import (
+  _write_tiny_full_body_bvh,
+  _write_tiny_humanoid_full_body_bvh,
+  _write_turning_humanoid_full_body_bvh,
+)
 
 
 def test_seed_vs_paper_raw_script_help_lists_visualization_options():
@@ -24,7 +28,7 @@ def test_seed_vs_paper_raw_script_help_lists_visualization_options():
   )
 
   assert result.returncode == 0, result.stderr
-  assert "seed G1 CSV against paper_v1 raw upper-body retargeting" in result.stdout
+  assert "seed G1 CSV against paper_v1 raw full-body retargeting" in result.stdout
   assert "--paper-raw-offset-to-seed" in result.stdout
   assert "--global-root" in result.stdout
 
@@ -50,20 +54,19 @@ def test_seed_vs_paper_raw_arg_parser_keeps_global_root_as_world_mode_alias():
   assert display_mode_from_args(args) == "world"
 
 
-def test_paper_raw_motion_row_preserves_seed_root_and_lower_body():
+def test_paper_raw_motion_row_preserves_seed_root_and_replaces_all_joints():
   from scripts.visualize_seed_vs_paper_raw_g1 import (
-    UPPER_BODY_DOF,
-    UPPER_BODY_START,
+    FULL_BODY_DOF,
     paper_raw_motion_row_from_seed,
   )
 
   seed_row = [float(index) for index in range(7 + 29)]
-  paper_upper_q = np.arange(UPPER_BODY_DOF, dtype=float) + 100.0
+  paper_full_q = np.arange(FULL_BODY_DOF, dtype=float) + 100.0
 
-  paper_row = paper_raw_motion_row_from_seed(seed_row, paper_upper_q)
+  paper_row = paper_raw_motion_row_from_seed(seed_row, paper_full_q)
 
-  assert paper_row[: 7 + UPPER_BODY_START] == seed_row[: 7 + UPPER_BODY_START]
-  assert paper_row[7 + UPPER_BODY_START :] == list(paper_upper_q)
+  assert paper_row[:7] == seed_row[:7]
+  assert paper_row[7:] == list(paper_full_q)
 
 
 def test_unwrap_to_moves_angle_to_reference_neighborhood():
@@ -87,7 +90,7 @@ def test_comparison_frames_include_raw_bvh_full_body_skeleton(tmp_path):
   from scripts.visualize_seed_vs_paper_raw_g1 import VisualizerConfig, build_comparison_frames
 
   bvh_path = tmp_path / "full.bvh"
-  _write_tiny_full_body_bvh(bvh_path)
+  _write_tiny_humanoid_full_body_bvh(bvh_path)
   csv_path = tmp_path / "seed.csv"
   with csv_path.open("w", newline="", encoding="utf-8") as handle:
     writer = csv.writer(handle)
@@ -168,7 +171,7 @@ def test_comparison_frames_infer_seed_csv_path_from_bones_seed_bvh_path(tmp_path
   dataset_root = tmp_path / "bones-seed"
   bvh_path = dataset_root / "soma_uniform" / "bvh" / "231006" / "full.bvh"
   bvh_path.parent.mkdir(parents=True)
-  _write_tiny_full_body_bvh(bvh_path)
+  _write_tiny_humanoid_full_body_bvh(bvh_path)
   csv_path = dataset_root / "g1" / "csv" / "231006" / "full.csv"
   _write_seed_csv(csv_path, frame_count=1)
 

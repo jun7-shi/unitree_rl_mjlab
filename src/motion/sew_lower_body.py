@@ -280,6 +280,27 @@ class G1LowerBodySEWRetargeter:
     candidates: list[float],
     score,
   ) -> float:
+    if self._can_skip_candidate_forward_scoring():
+      scored_candidates: list[tuple[np.ndarray, tuple[float, float], float, bool]] = []
+      for angle in candidates:
+        for bounded_candidate in self._bounded_equivalent_angle_candidates(angle, joint_index):
+          candidate_q = q.copy()
+          candidate_q[joint_index] = bounded_candidate.angle
+          joint_distance = abs(float(bounded_candidate.angle - q[joint_index]))
+          candidate_score = candidate_sort_key(
+            axis_error=0.0,
+            joint_distance=joint_distance,
+            error_tolerance=self.algorithm_config.error_tolerance,
+          )
+          scored_candidates.append((candidate_q, candidate_score, joint_distance, bounded_candidate.clipped))
+      best_q = select_limit_projected_sew_candidate(scored_candidates, config=self.algorithm_config)
+      if best_q is not None:
+        return float(best_q[joint_index])
+      fallback = float(candidates[0] if candidates else q[joint_index])
+      if not self.algorithm_config.respect_joint_limits:
+        return fallback
+      return float(np.clip(fallback, *self.joint_limits[joint_index]))
+
     scored_candidates: list[tuple[np.ndarray, tuple[float, float], float, bool]] = []
     for angle in candidates:
       for bounded_candidate in self._bounded_equivalent_angle_candidates(angle, joint_index):
@@ -317,6 +338,24 @@ class G1LowerBodySEWRetargeter:
     relative_candidates: list[tuple[float, float]],
     score,
   ) -> np.ndarray:
+    if self._can_skip_candidate_forward_scoring():
+      candidate_q = self._select_closed_form_candidate_by_continuity(
+        q,
+        indexes,
+        (
+          candidate
+          for first, second in relative_candidates
+          for candidate in self._bounded_angle_pair_candidates(indexes, first, second)
+        ),
+      )
+      if candidate_q is not None:
+        return candidate_q
+
+      fallback = q.copy()
+      if relative_candidates:
+        fallback[indexes] = np.array(relative_candidates[0], dtype=float)
+      return self._clip_joint_angles(fallback)
+
     scored_candidates: list[tuple[np.ndarray, tuple[float, float], float, bool]] = []
     for first, second in relative_candidates:
       for candidate_values, clipped in self._bounded_angle_pair_candidates(indexes, first, second):
@@ -380,6 +419,36 @@ class G1LowerBodySEWRetargeter:
     errors.update(self._leg_diagnostics("left", target.left_leg))
     errors.update(self._leg_diagnostics("right", target.right_leg))
     return errors
+
+  def _can_skip_candidate_forward_scoring(self) -> bool:
+    return (
+      not self.algorithm_config.respect_joint_limits
+      and not self.algorithm_config.branch_preserving
+      and not self.algorithm_config.clip_limit_candidates
+    )
+
+  def _select_closed_form_candidate_by_continuity(
+    self,
+    q: np.ndarray,
+    indexes: np.ndarray,
+    bounded_candidates,
+  ) -> np.ndarray | None:
+    scored_candidates: list[tuple[np.ndarray, tuple[float, float], float, bool]] = []
+    for values, clipped in bounded_candidates:
+      candidate_q = q.copy()
+      candidate_q[indexes] = values
+      joint_distance = float(np.linalg.norm(candidate_q[indexes] - q[indexes]))
+      score = candidate_sort_key(
+        axis_error=0.0,
+        joint_distance=joint_distance,
+        error_tolerance=self.algorithm_config.error_tolerance,
+      )
+      scored_candidates.append((candidate_q, score, joint_distance, clipped))
+
+    best_q = select_limit_projected_sew_candidate(scored_candidates, config=self.algorithm_config)
+    if best_q is None:
+      return None
+    return self._clip_joint_angles(best_q)
 
   def _leg_diagnostics(self, side: str, target: LegKeypointTarget) -> dict[str, float]:
     target_thigh = normalize(target.knee - target.hip)

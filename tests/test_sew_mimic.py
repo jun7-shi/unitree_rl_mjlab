@@ -10,6 +10,7 @@ from src.motion.sew_mimic import (
   normalize,
   retarget_motion_rows_from_targets,
   rotation_about_axis,
+  solve_g1_waist_angles,
   solve_two_axis_rotation,
   subproblem1,
   subproblem4,
@@ -73,6 +74,25 @@ def test_solve_two_axis_rotation_matches_paper_subproblem2_composition():
     ) <= 1e-8
     for first, second in candidates
   )
+
+
+def test_solve_g1_waist_angles_returns_equivalent_zxy_candidates():
+  target = (
+    rotation_about_axis([0.0, 0.0, 1.0], 0.35)
+    @ rotation_about_axis([1.0, 0.0, 0.0], -0.22)
+    @ rotation_about_axis([0.0, 1.0, 0.0], 0.18)
+  )
+
+  candidates = solve_g1_waist_angles(target)
+
+  assert len(candidates) == 2
+  for yaw, roll, pitch in candidates:
+    reconstructed = (
+      rotation_about_axis([0.0, 0.0, 1.0], yaw)
+      @ rotation_about_axis([1.0, 0.0, 0.0], roll)
+      @ rotation_about_axis([0.0, 1.0, 0.0], pitch)
+    )
+    np.testing.assert_allclose(reconstructed, target, atol=1e-8)
 
 
 def test_candidate_sort_key_prefers_continuity_for_numerical_error_ties():

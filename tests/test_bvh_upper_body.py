@@ -3,6 +3,7 @@ import textwrap
 import numpy as np
 
 from src.motion.bvh_upper_body import (
+  load_soma_bvh_upper_body_human_keypoint_targets,
   load_soma_bvh_upper_body_targets,
   soma_to_g1_upper_body_orientation_offsets,
 )
@@ -112,30 +113,53 @@ def test_load_soma_bvh_upper_body_targets_can_apply_soma_to_g1_orientation_offse
   )
 
 
-def test_load_soma_bvh_upper_body_targets_can_align_upper_arm_axes_to_g1(tmp_path):
+def test_load_soma_bvh_upper_body_targets_can_synthesize_g1_axis_proxy_targets(tmp_path):
   bvh_path = tmp_path / "upper.bvh"
   _write_tiny_upper_body_bvh(bvh_path)
 
   base = load_soma_bvh_upper_body_targets(bvh_path, frame_slice=slice(0, 1))[0]
-  aligned = load_soma_bvh_upper_body_targets(
+  proxy = load_soma_bvh_upper_body_targets(
     bvh_path,
     frame_slice=slice(0, 1),
     align_upper_arm_axes_to_g1=True,
   )[0]
 
   base_left_upper = base.left_arm.elbow - base.left_arm.shoulder
-  aligned_left_upper = aligned.left_arm.elbow - aligned.left_arm.shoulder
+  proxy_left_upper = proxy.left_arm.elbow - proxy.left_arm.shoulder
   base_left_lower = base.left_arm.wrist - base.left_arm.elbow
-  aligned_left_lower = aligned.left_arm.wrist - aligned.left_arm.elbow
-  np.testing.assert_allclose(aligned_left_upper, -base_left_upper)
-  np.testing.assert_allclose(aligned_left_lower, base_left_lower)
+  proxy_left_lower = proxy.left_arm.wrist - proxy.left_arm.elbow
+  assert not np.allclose(proxy.left_arm.shoulder, base.left_arm.shoulder)
+  np.testing.assert_allclose(proxy_left_upper, -base_left_upper)
+  np.testing.assert_allclose(proxy_left_lower, base_left_lower)
 
   base_right_upper = base.right_arm.elbow - base.right_arm.shoulder
-  aligned_right_upper = aligned.right_arm.elbow - aligned.right_arm.shoulder
+  proxy_right_upper = proxy.right_arm.elbow - proxy.right_arm.shoulder
   base_right_lower = base.right_arm.wrist - base.right_arm.elbow
-  aligned_right_lower = aligned.right_arm.wrist - aligned.right_arm.elbow
-  np.testing.assert_allclose(aligned_right_upper, -base_right_upper)
-  np.testing.assert_allclose(aligned_right_lower, base_right_lower)
+  proxy_right_lower = proxy.right_arm.wrist - proxy.right_arm.elbow
+  assert not np.allclose(proxy.right_arm.shoulder, base.right_arm.shoulder)
+  np.testing.assert_allclose(proxy_right_upper, -base_right_upper)
+  np.testing.assert_allclose(proxy_right_lower, base_right_lower)
+
+
+def test_human_keypoint_loader_preserves_shoulder_while_proxy_loader_replaces_it(tmp_path):
+  bvh_path = tmp_path / "upper.bvh"
+  _write_tiny_upper_body_bvh(bvh_path)
+
+  human = load_soma_bvh_upper_body_human_keypoint_targets(bvh_path, frame_slice=slice(0, 1))[0]
+  default = load_soma_bvh_upper_body_targets(bvh_path, frame_slice=slice(0, 1))[0]
+  proxy = load_soma_bvh_upper_body_targets(
+    bvh_path,
+    frame_slice=slice(0, 1),
+    align_upper_arm_axes_to_g1=True,
+  )[0]
+
+  np.testing.assert_allclose(human.left_arm.shoulder, default.left_arm.shoulder)
+  np.testing.assert_allclose(human.right_arm.shoulder, default.right_arm.shoulder)
+
+  assert not np.allclose(proxy.left_arm.shoulder, human.left_arm.shoulder)
+  assert not np.allclose(proxy.right_arm.shoulder, human.right_arm.shoulder)
+  np.testing.assert_allclose(proxy.left_arm.shoulder, human.left_arm.elbow)
+  np.testing.assert_allclose(proxy.right_arm.shoulder, human.right_arm.elbow)
 
 
 def test_load_soma_bvh_upper_body_targets_can_remove_initial_heading(tmp_path):

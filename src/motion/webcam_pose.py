@@ -6,7 +6,7 @@ from typing import Sequence
 
 import numpy as np
 
-from src.motion.bvh_upper_body import _flip_upper_arm_axis
+from src.motion.bvh_upper_body import synthesize_g1_axis_proxy_arm_target
 from src.motion.sew_full_body import FullBodyTarget
 from src.motion.sew_lower_body import LegKeypointTarget, LowerBodyTarget
 from src.motion.sew_mimic import ArmKeypointTarget, normalize
@@ -199,8 +199,8 @@ def _upper_body_target_from_points(
     hand_orientation=right_hand_orientation,
   )
   if align_upper_arm_axes_to_g1:
-    left_arm = _flip_upper_arm_axis(left_arm)
-    right_arm = _flip_upper_arm_axis(right_arm)
+    left_arm = synthesize_g1_axis_proxy_arm_target(left_arm)
+    right_arm = synthesize_g1_axis_proxy_arm_target(right_arm)
   return UpperBodyTarget(
     chest_position=0.5 * (points["left_shoulder"] + points["right_shoulder"]),
     chest_orientation=chest_orientation,

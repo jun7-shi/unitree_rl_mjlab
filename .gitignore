@@ -10,6 +10,7 @@ wandb
 /.worktrees/
 tea_debug.log
 MUJOCO_LOG.TXT
+pose_landmarker_lite.task
 deploy/robots/go2/build
 deploy/robots/g1/build
 deploy/robots/h1_2/build

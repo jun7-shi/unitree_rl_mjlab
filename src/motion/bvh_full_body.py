@@ -7,9 +7,9 @@ import numpy as np
 
 from src.motion.bvh_sew import load_bvh, soma_mujoco_to_mjlab_rotation
 from src.motion.bvh_upper_body import (
-  _flip_upper_arm_axis,
   _rotation_matrix_from_quat_xyzw,
   soma_to_g1_upper_body_orientation_offsets,
+  synthesize_g1_axis_proxy_arm_target,
 )
 from src.motion.sew_full_body import FullBodyTarget
 from src.motion.sew_lower_body import LegKeypointTarget, LowerBodyTarget
@@ -131,8 +131,8 @@ def load_soma_bvh_full_body_targets(
       hand_orientation=right_hand_orientation,
     )
     if align_upper_arm_axes_to_g1:
-      left_arm = _flip_upper_arm_axis(left_arm)
-      right_arm = _flip_upper_arm_axis(right_arm)
+      left_arm = synthesize_g1_axis_proxy_arm_target(left_arm)
+      right_arm = synthesize_g1_axis_proxy_arm_target(right_arm)
     lower = (
       _lower_body_target_from_scaled_effectors(pose, names, lower_body_offsets)
       if lower_body_offsets is not None
@@ -160,6 +160,37 @@ def load_soma_bvh_full_body_targets(
   elif remove_initial_heading:
     targets = _remove_initial_heading(targets)
   return targets
+
+
+def load_soma_bvh_full_body_human_keypoint_targets(
+  path: str | Path,
+  *,
+  scale: float = 0.01,
+  frame_slice: slice | None = None,
+  joint_names: dict[str, str] | None = None,
+  apply_orientation_offsets: bool = False,
+  apply_lower_body_offsets: bool = False,
+  remove_initial_heading: bool = False,
+  localize_to_body_frame: bool = False,
+) -> list[FullBodyTarget]:
+  """Load BVH full-body targets that preserve human shoulder/elbow/wrist keypoints.
+
+  This is the paper-pure entry point for the upper arms: ``elbow - shoulder``
+  matches the human's physical upper-arm direction. Use
+  ``load_soma_bvh_full_body_targets`` with ``align_upper_arm_axes_to_g1=True``
+  if you want the G1 axis proxy convention instead.
+  """
+  return load_soma_bvh_full_body_targets(
+    path,
+    scale=scale,
+    frame_slice=frame_slice,
+    joint_names=joint_names,
+    apply_orientation_offsets=apply_orientation_offsets,
+    align_upper_arm_axes_to_g1=False,
+    apply_lower_body_offsets=apply_lower_body_offsets,
+    remove_initial_heading=remove_initial_heading,
+    localize_to_body_frame=localize_to_body_frame,
+  )
 
 
 def _body_frame_from_pose(pose, names: dict[str, str]) -> np.ndarray:

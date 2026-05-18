@@ -73,8 +73,8 @@ def load_soma_bvh_upper_body_targets(
       hand_orientation=right_hand_orientation,
     )
     if align_upper_arm_axes_to_g1:
-      left_arm = _flip_upper_arm_axis(left_arm)
-      right_arm = _flip_upper_arm_axis(right_arm)
+      left_arm = synthesize_g1_axis_proxy_arm_target(left_arm)
+      right_arm = synthesize_g1_axis_proxy_arm_target(right_arm)
 
     targets.append(
       UpperBodyTarget(
@@ -89,7 +89,38 @@ def load_soma_bvh_upper_body_targets(
   return targets
 
 
-def _flip_upper_arm_axis(target: ArmKeypointTarget) -> ArmKeypointTarget:
+def load_soma_bvh_upper_body_human_keypoint_targets(
+  path: str | Path,
+  *,
+  scale: float = 0.01,
+  frame_slice: slice | None = None,
+  joint_names: dict[str, str] | None = None,
+  apply_orientation_offsets: bool = False,
+  remove_initial_heading: bool = False,
+) -> list[UpperBodyTarget]:
+  """Load BVH upper-body targets that preserve human shoulder/elbow/wrist keypoints.
+
+  This is the paper-pure entry point: ``elbow - shoulder`` matches the
+  human's physical upper-arm direction. Use this when you want the SEW
+  solver to see the paper's defined input semantics.
+
+  Use ``load_soma_bvh_upper_body_targets`` with
+  ``align_upper_arm_axes_to_g1=True`` instead if you want the G1 axis proxy
+  target that drives the closed-form solver to zero axis residual against
+  a reachable robot pose at the cost of losing human keypoint semantics.
+  """
+  return load_soma_bvh_upper_body_targets(
+    path,
+    scale=scale,
+    frame_slice=frame_slice,
+    joint_names=joint_names,
+    apply_orientation_offsets=apply_orientation_offsets,
+    align_upper_arm_axes_to_g1=False,
+    remove_initial_heading=remove_initial_heading,
+  )
+
+
+def synthesize_g1_axis_proxy_arm_target(target: ArmKeypointTarget) -> ArmKeypointTarget:
   shoulder = target.elbow.copy()
   elbow = shoulder + (target.shoulder - target.elbow)
   wrist = elbow + (target.wrist - target.elbow)

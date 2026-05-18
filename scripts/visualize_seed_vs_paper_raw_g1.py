@@ -22,14 +22,14 @@ from scripts.visualize_seed_bvh_axes import (
   _set_qpos_from_seed_motion_row,
 )
 from src.motion.bvh_full_body import load_soma_bvh_full_body_targets
-from src.motion.bvh_upper_body import load_soma_bvh_upper_body_targets
+from src.motion.seed_bones import G1_29DOF_JOINT_COLUMNS
 from src.motion.sew_full_body import FullBodyTarget
+from src.motion.sew_full_body import G1FullBodySEWRetargeter
 from src.motion.sew_mimic import PAPER_V1_ALGORITHM, normalize
-from src.motion.sew_upper_body import G1UpperBodySEWRetargeter
 
 
 UPPER_BODY_START = 12
-UPPER_BODY_DOF = 17
+FULL_BODY_DOF = len(G1_29DOF_JOINT_COLUMNS)
 LEFT_SHOULDER_PITCH_UPPER_INDEX = 3
 BODY_CENTRIC_DISPLAY_MODE = "body-centric"
 WORLD_DISPLAY_MODE = "world"
@@ -62,7 +62,7 @@ class ComparisonFrame:
   bvh_full_target: FullBodyTarget
   seed_motion_row: list[float]
   paper_raw_motion_row: list[float]
-  paper_raw_upper_q: np.ndarray
+  paper_raw_joint_angles: np.ndarray
   paper_raw_left_shoulder_pitch_deg: float
   displayed_left_shoulder_pitch_deg: float
   seed_left_shoulder_pitch_deg: float
@@ -108,13 +108,15 @@ def unwrap_to(value_deg: float, reference_deg: float) -> float:
 
 def paper_raw_motion_row_from_seed(
   seed_motion_row: Sequence[float],
-  paper_raw_upper_q: Sequence[float],
+  paper_raw_joint_angles: Sequence[float],
 ) -> list[float]:
   row = list(seed_motion_row)
-  upper_q = list(np.asarray(paper_raw_upper_q, dtype=float))
-  if len(upper_q) != UPPER_BODY_DOF:
-    raise ValueError(f"paper_raw_upper_q must have {UPPER_BODY_DOF} values, got {len(upper_q)}")
-  row[7 + UPPER_BODY_START :] = upper_q
+  joint_angles = list(np.asarray(paper_raw_joint_angles, dtype=float))
+  if len(joint_angles) != FULL_BODY_DOF:
+    raise ValueError(
+      f"paper_raw_joint_angles must have {FULL_BODY_DOF} values, got {len(joint_angles)}"
+    )
+  row[7:] = joint_angles
   return row
 
 
@@ -135,15 +137,17 @@ def _resolve_seed_csv_path(config: VisualizerConfig) -> Path:
   return infer_seed_csv_path_from_bvh(config.bvh_path)
 
 
-def _paper_raw_upper_body_q(config: VisualizerConfig, frame_count: int | None = None) -> list[np.ndarray]:
-  targets = load_soma_bvh_upper_body_targets(
+def _paper_raw_full_body_q(config: VisualizerConfig, frame_count: int | None = None) -> list[np.ndarray]:
+  targets = load_soma_bvh_full_body_targets(
     config.bvh_path,
     apply_orientation_offsets=config.apply_orientation_offsets,
     align_upper_arm_axes_to_g1=config.align_upper_arm_axes_to_g1,
+    apply_lower_body_offsets=True,
     remove_initial_heading=config.remove_initial_heading,
+    localize_to_body_frame=True,
   )
-  retargeter = G1UpperBodySEWRetargeter(algorithm_version=PAPER_V1_ALGORITHM)
-  q_previous = np.zeros(UPPER_BODY_DOF, dtype=float)
+  retargeter = G1FullBodySEWRetargeter(algorithm_version=PAPER_V1_ALGORITHM)
+  q_previous = np.zeros(FULL_BODY_DOF, dtype=float)
   rows: list[np.ndarray] = []
   selected_targets = targets if frame_count is None else targets[:frame_count]
   for target in selected_targets:
@@ -169,7 +173,7 @@ def build_comparison_frames(config: VisualizerConfig) -> list[ComparisonFrame]:
   if not seed_rows:
     raise ValueError(f"Seed CSV has no motion rows: {seed_csv_path}")
   requested_frame_count = None if config.end_frame is None else config.end_frame + 1
-  paper_upper_rows = _paper_raw_upper_body_q(config, requested_frame_count)
+  paper_full_rows = _paper_raw_full_body_q(config, requested_frame_count)
   bvh_full_targets = load_soma_bvh_full_body_targets(
     config.bvh_path,
     apply_orientation_offsets=config.apply_orientation_offsets,
@@ -178,15 +182,15 @@ def build_comparison_frames(config: VisualizerConfig) -> list[ComparisonFrame]:
     remove_initial_heading=config.remove_initial_heading and config.display_mode == BODY_CENTRIC_DISPLAY_MODE,
     localize_to_body_frame=False,
   )
-  available_frame_count = min(len(seed_rows), len(paper_upper_rows), len(bvh_full_targets))
+  available_frame_count = min(len(seed_rows), len(paper_full_rows), len(bvh_full_targets))
   if available_frame_count <= 0:
     raise ValueError("No overlapping frames are available between seed CSV and BVH")
 
   end_frame = config.end_frame if config.end_frame is not None else available_frame_count - 1
   if end_frame >= len(seed_rows):
     raise ValueError(f"end_frame {end_frame} is out of range for {len(seed_rows)} seed rows")
-  if end_frame >= len(paper_upper_rows):
-    raise ValueError(f"BVH has only {len(paper_upper_rows)} upper-body targets")
+  if end_frame >= len(paper_full_rows):
+    raise ValueError(f"BVH has only {len(paper_full_rows)} paper retarget targets")
   if end_frame >= len(bvh_full_targets):
     raise ValueError(f"BVH has only {len(bvh_full_targets)} display targets")
   if config.start_frame > end_frame:
@@ -195,25 +199,26 @@ def build_comparison_frames(config: VisualizerConfig) -> list[ComparisonFrame]:
   frames: list[ComparisonFrame] = []
   for frame_index in range(config.start_frame, end_frame + 1):
     seed_row = seed_rows[frame_index]
-    paper_upper_q = paper_upper_rows[frame_index]
+    paper_full_q = paper_full_rows[frame_index]
     seed_pitch_deg = float(np.degrees(seed_row[7 + UPPER_BODY_START + LEFT_SHOULDER_PITCH_UPPER_INDEX]))
-    raw_pitch_deg = float(np.degrees(paper_upper_q[LEFT_SHOULDER_PITCH_UPPER_INDEX]))
+    shoulder_pitch_index = UPPER_BODY_START + LEFT_SHOULDER_PITCH_UPPER_INDEX
+    raw_pitch_deg = float(np.degrees(paper_full_q[shoulder_pitch_index]))
     displayed_pitch_deg = (
       unwrap_to(raw_pitch_deg, seed_pitch_deg)
       if config.paper_raw_offset_to_seed
       else raw_pitch_deg
     )
     display_offset_k = int(round((displayed_pitch_deg - raw_pitch_deg) / 360.0))
-    display_upper_q = paper_upper_q.copy()
-    display_upper_q[LEFT_SHOULDER_PITCH_UPPER_INDEX] = np.radians(displayed_pitch_deg)
+    display_full_q = paper_full_q.copy()
+    display_full_q[shoulder_pitch_index] = np.radians(displayed_pitch_deg)
     frames.append(
       ComparisonFrame(
         frame_index=frame_index,
         csv_frame=csv_frames[frame_index],
         bvh_full_target=bvh_full_targets[frame_index],
         seed_motion_row=seed_row,
-        paper_raw_motion_row=paper_raw_motion_row_from_seed(seed_row, display_upper_q),
-        paper_raw_upper_q=paper_upper_q,
+        paper_raw_motion_row=paper_raw_motion_row_from_seed(seed_row, display_full_q),
+        paper_raw_joint_angles=paper_full_q,
         paper_raw_left_shoulder_pitch_deg=raw_pitch_deg,
         displayed_left_shoulder_pitch_deg=displayed_pitch_deg,
         seed_left_shoulder_pitch_deg=seed_pitch_deg,
@@ -306,11 +311,12 @@ def _mesh_snapshot_from_motion_row(
 def _format_info(frame: ComparisonFrame, *, display_mode: str) -> str:
   return (
     f"**Frame:** {frame.frame_index}  **CSV Frame:** {frame.csv_frame}<br>"
-    f"**Root/lower body:** copied from seed CSV for both robots<br>"
+    f"**Root:** copied from seed CSV for both robots<br>"
     f"**Orange column:** BVH full-body keypoint skeleton after SOMA-to-mjlab conversion; "
     f"no G1 upper-arm axis flip, no lower-body offsets<br>"
     f"**Green column:** seed G1 CSV full pose<br>"
-    f"**Blue column:** paper_v1 raw upper-body retarget on seed root/lower-body<br>"
+    f"**Blue column:** paper_v1 raw full-body SEW retarget on seed root; "
+    f"legs use hip-knee-ankle as SEW targets, waist uses G1 Z-X-Y Euler decomposition<br>"
     f"**Display mode:** {display_mode}<br><br>"
     f"**seed left shoulder pitch:** {frame.seed_left_shoulder_pitch_deg:.3f} deg<br>"
     f"**paper raw left shoulder pitch:** {frame.paper_raw_left_shoulder_pitch_deg:.3f} deg<br>"
@@ -727,7 +733,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
 def build_arg_parser() -> argparse.ArgumentParser:
   parser = argparse.ArgumentParser(
     description=(
-      "Visualize seed G1 CSV against paper_v1 raw upper-body retargeting, "
+      "Visualize seed G1 CSV against paper_v1 raw full-body retargeting, "
       "with the BVH full-body skeleton beside them."
     )
   )
