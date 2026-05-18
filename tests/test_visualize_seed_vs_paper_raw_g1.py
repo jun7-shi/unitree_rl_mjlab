@@ -324,9 +324,8 @@ def test_bvh_display_snapshot_updates_points_with_stable_shapes(tmp_path):
   assert not np.allclose(first.skeleton_segments, second.skeleton_segments)
 
 
-def test_bvh_world_display_preserves_source_translation(tmp_path):
+def test_bvh_world_display_aligns_skeleton_to_seed_root_pose(tmp_path):
   from scripts.visualize_seed_vs_paper_raw_g1 import (
-    BODY_CENTRIC_DISPLAY_MODE,
     WORLD_DISPLAY_MODE,
     _bvh_display_snapshot,
   )
@@ -340,16 +339,40 @@ def test_bvh_world_display_preserves_source_translation(tmp_path):
     align_upper_arm_axes_to_g1=False,
     remove_initial_heading=False,
   )[0]
+  seed_row = [1.25, -0.5, 0.8, 0.0, 0.0, 0.0, 1.0, *([0.0] * len(G1_29DOF_JOINT_COLUMNS))]
 
-  body_snapshot = _bvh_display_snapshot(
-    target,
-    np.zeros(3),
-    display_mode=BODY_CENTRIC_DISPLAY_MODE,
-  )
-  world_snapshot = _bvh_display_snapshot(
+  snapshot = _bvh_display_snapshot(
     target,
     np.zeros(3),
     display_mode=WORLD_DISPLAY_MODE,
+    seed_motion_row=seed_row,
   )
 
-  assert not np.allclose(body_snapshot.skeleton_segments, world_snapshot.skeleton_segments)
+  left_hip = snapshot.keypoints[7]
+  right_hip = snapshot.keypoints[10]
+  np.testing.assert_allclose(0.5 * (left_hip + right_hip), seed_row[:3], atol=1e-8)
+
+  shifted_row = list(seed_row)
+  shifted_row[0] += 0.4
+  shifted = _bvh_display_snapshot(
+    target,
+    np.zeros(3),
+    display_mode=WORLD_DISPLAY_MODE,
+    seed_motion_row=shifted_row,
+  )
+  np.testing.assert_allclose(
+    shifted.skeleton_segments - snapshot.skeleton_segments,
+    np.full_like(snapshot.skeleton_segments, [0.4, 0.0, 0.0]),
+    atol=1e-8,
+  )
+
+  yaw_90_row = [1.25, -0.5, 0.8, 0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5), *([0.0] * len(G1_29DOF_JOINT_COLUMNS))]
+  rotated = _bvh_display_snapshot(
+    target,
+    np.zeros(3),
+    display_mode=WORLD_DISPLAY_MODE,
+    seed_motion_row=yaw_90_row,
+  )
+  rotated_left_axis = rotated.keypoints[7] - rotated.keypoints[10]
+  rotated_left_axis = rotated_left_axis / np.linalg.norm(rotated_left_axis)
+  np.testing.assert_allclose(rotated_left_axis, [-1.0, 0.0, 0.0], atol=1e-8)

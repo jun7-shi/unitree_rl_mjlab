@@ -227,6 +227,14 @@ def _wxyz_from_xmat(xmat: Sequence[float]) -> np.ndarray:
   return quat
 
 
+def _rotation_matrix_from_seed_motion_row(row: Sequence[float]) -> np.ndarray:
+  values = list(row)
+  quat_wxyz = np.asarray([values[6], values[3], values[4], values[5]], dtype=float)
+  matrix = np.empty(9, dtype=float)
+  mujoco.mju_quat2Mat(matrix, quat_wxyz)
+  return matrix.reshape(3, 3)
+
+
 def _articulated_geom_pose_snapshot(
   model: mujoco.MjModel,
   data: mujoco.MjData,
@@ -343,15 +351,76 @@ def _bvh_display_origin(target: FullBodyTarget, display_mode: str) -> np.ndarray
   if display_mode == BODY_CENTRIC_DISPLAY_MODE:
     return _bvh_full_origin(target)
   if display_mode == WORLD_DISPLAY_MODE:
-    return np.zeros(3)
+    return _bvh_hip_center(target)
   raise ValueError(f"display_mode must be one of {DISPLAY_MODES}, got {display_mode!r}")
 
 
-def _full_bvh_segments(target: FullBodyTarget, offset: np.ndarray, *, display_mode: str) -> np.ndarray:
-  origin = _bvh_display_origin(target, display_mode)
+def _bvh_hip_center(target: FullBodyTarget) -> np.ndarray:
+  return 0.5 * (target.lower.left_leg.hip + target.lower.right_leg.hip)
 
-  def p(value: np.ndarray) -> np.ndarray:
-    return np.asarray(value, dtype=float) - origin + offset
+
+def _project_bvh_up_axis(candidate: np.ndarray, left_axis: np.ndarray) -> np.ndarray:
+  for axis in (candidate, np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0])):
+    projected = axis - left_axis * float(np.dot(axis, left_axis))
+    norm = float(np.linalg.norm(projected))
+    if norm > 1e-12:
+      return projected / norm
+  raise ValueError("Cannot construct a BVH body frame from collinear hip and chest keypoints")
+
+
+def _bvh_body_frame(target: FullBodyTarget) -> np.ndarray:
+  left_hip = target.lower.left_leg.hip
+  right_hip = target.lower.right_leg.hip
+  left_axis = normalize(left_hip - right_hip)
+  up_axis = _project_bvh_up_axis(target.upper.chest_position - _bvh_hip_center(target), left_axis)
+  forward_axis = normalize(np.cross(left_axis, up_axis))
+  up_axis = normalize(np.cross(forward_axis, left_axis))
+  return np.column_stack([forward_axis, left_axis, up_axis])
+
+
+def _bvh_display_point_transform(
+  target: FullBodyTarget,
+  offset: np.ndarray,
+  *,
+  display_mode: str,
+  seed_motion_row: Sequence[float] | None,
+):
+  if display_mode == BODY_CENTRIC_DISPLAY_MODE:
+    origin = _bvh_full_origin(target)
+
+    def transform(point: np.ndarray) -> np.ndarray:
+      return np.asarray(point, dtype=float) - origin + offset
+
+    return transform
+  if display_mode == WORLD_DISPLAY_MODE:
+    if seed_motion_row is None:
+      raise ValueError("seed_motion_row is required for BVH world display mode")
+    origin = _bvh_hip_center(target)
+    body_frame = _bvh_body_frame(target)
+    root_position = np.asarray(seed_motion_row[:3], dtype=float)
+    root_orientation = _rotation_matrix_from_seed_motion_row(seed_motion_row)
+
+    def transform(point: np.ndarray) -> np.ndarray:
+      local = body_frame.T @ (np.asarray(point, dtype=float) - origin)
+      return root_position + root_orientation @ local + offset
+
+    return transform
+  raise ValueError(f"display_mode must be one of {DISPLAY_MODES}, got {display_mode!r}")
+
+
+def _full_bvh_segments(
+  target: FullBodyTarget,
+  offset: np.ndarray,
+  *,
+  display_mode: str,
+  seed_motion_row: Sequence[float] | None,
+) -> np.ndarray:
+  p = _bvh_display_point_transform(
+    target,
+    offset,
+    display_mode=display_mode,
+    seed_motion_row=seed_motion_row,
+  )
 
   upper = target.upper
   lower = target.lower
@@ -374,8 +443,19 @@ def _full_bvh_segments(target: FullBodyTarget, offset: np.ndarray, *, display_mo
   return np.asarray([[p(start), p(end)] for start, end in segments], dtype=float)
 
 
-def _full_bvh_points(target: FullBodyTarget, offset: np.ndarray, *, display_mode: str) -> np.ndarray:
-  origin = _bvh_display_origin(target, display_mode)
+def _full_bvh_points(
+  target: FullBodyTarget,
+  offset: np.ndarray,
+  *,
+  display_mode: str,
+  seed_motion_row: Sequence[float] | None,
+) -> np.ndarray:
+  transform = _bvh_display_point_transform(
+    target,
+    offset,
+    display_mode=display_mode,
+    seed_motion_row=seed_motion_row,
+  )
   upper = target.upper
   lower = target.lower
   points = [
@@ -393,7 +473,7 @@ def _full_bvh_points(target: FullBodyTarget, offset: np.ndarray, *, display_mode
     lower.right_leg.knee,
     lower.right_leg.ankle,
   ]
-  return np.asarray([np.asarray(point, dtype=float) - origin + offset for point in points])
+  return np.asarray([transform(point) for point in points], dtype=float)
 
 
 def _full_bvh_axis_segments(
@@ -402,11 +482,14 @@ def _full_bvh_axis_segments(
   *,
   display_mode: str,
   axis_length: float,
+  seed_motion_row: Sequence[float] | None,
 ) -> np.ndarray:
-  origin = _bvh_display_origin(target, display_mode)
-
-  def p(value: np.ndarray) -> np.ndarray:
-    return np.asarray(value, dtype=float) - origin + offset
+  p = _bvh_display_point_transform(
+    target,
+    offset,
+    display_mode=display_mode,
+    seed_motion_row=seed_motion_row,
+  )
 
   upper = target.upper
   left_upper = normalize(upper.left_arm.elbow - upper.left_arm.shoulder)
@@ -425,16 +508,33 @@ def _full_bvh_axis_segments(
   )
 
 
-def _bvh_display_snapshot(target: FullBodyTarget, offset: np.ndarray, *, display_mode: str) -> BvhDisplaySnapshot:
+def _bvh_display_snapshot(
+  target: FullBodyTarget,
+  offset: np.ndarray,
+  *,
+  display_mode: str,
+  seed_motion_row: Sequence[float] | None = None,
+) -> BvhDisplaySnapshot:
   return BvhDisplaySnapshot(
-    skeleton_segments=_full_bvh_segments(target, offset, display_mode=display_mode),
+    skeleton_segments=_full_bvh_segments(
+      target,
+      offset,
+      display_mode=display_mode,
+      seed_motion_row=seed_motion_row,
+    ),
     axis_segments=_full_bvh_axis_segments(
       target,
       offset,
       display_mode=display_mode,
       axis_length=0.18,
+      seed_motion_row=seed_motion_row,
     ),
-    keypoints=_full_bvh_points(target, offset, display_mode=display_mode),
+    keypoints=_full_bvh_points(
+      target,
+      offset,
+      display_mode=display_mode,
+      seed_motion_row=seed_motion_row,
+    ),
   )
 
 
@@ -526,8 +626,18 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
       handle.position = position
       handle.wxyz = wxyz
 
-  def add_bvh_target(name: str, target: FullBodyTarget, offset: np.ndarray) -> BvhDisplayHandles:
-    snapshot = _bvh_display_snapshot(target, offset, display_mode=config.display_mode)
+  def add_bvh_target(
+    name: str,
+    target: FullBodyTarget,
+    row: Sequence[float],
+    offset: np.ndarray,
+  ) -> BvhDisplayHandles:
+    snapshot = _bvh_display_snapshot(
+      target,
+      offset,
+      display_mode=config.display_mode,
+      seed_motion_row=row,
+    )
     skeleton_handle = server.scene.add_line_segments(
         f"/{name}/skeleton",
         points=snapshot.skeleton_segments,
@@ -564,15 +674,26 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
   def update_bvh_target(
     handles: BvhDisplayHandles,
     target: FullBodyTarget,
+    row: Sequence[float],
     offset: np.ndarray,
   ) -> None:
-    snapshot = _bvh_display_snapshot(target, offset, display_mode=config.display_mode)
+    snapshot = _bvh_display_snapshot(
+      target,
+      offset,
+      display_mode=config.display_mode,
+      seed_motion_row=row,
+    )
     handles.skeleton_handle.points = snapshot.skeleton_segments
     handles.axes_handle.points = snapshot.axis_segments
     handles.keypoints_handle.points = snapshot.keypoints
 
   initial_frame = frame_by_index[min(frame_indices)]
-  bvh_display = add_bvh_target("BVH full skeleton", initial_frame.bvh_full_target, offsets["bvh"])
+  bvh_display = add_bvh_target(
+    "BVH full skeleton",
+    initial_frame.bvh_full_target,
+    initial_frame.seed_motion_row,
+    offsets["bvh"],
+  )
   seed_robot = add_articulated_robot(
     "seed G1 CSV",
     seed_context,
@@ -594,7 +715,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
     if last_rendered_frame == frame_index:
       return
     frame = frame_by_index[int(frame_index)]
-    update_bvh_target(bvh_display, frame.bvh_full_target, offsets["bvh"])
+    update_bvh_target(bvh_display, frame.bvh_full_target, frame.seed_motion_row, offsets["bvh"])
     update_articulated_robot(seed_robot, seed_context, frame.seed_motion_row, offsets["seed"])
     update_articulated_robot(
       paper_robot,
