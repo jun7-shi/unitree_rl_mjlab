@@ -6,7 +6,7 @@ from pathlib import Path
 import numpy as np
 
 from src.motion.seed_bones import G1_29DOF_JOINT_COLUMNS
-from tests.test_bvh_full_body import _write_tiny_full_body_bvh
+from tests.test_bvh_full_body import _write_tiny_full_body_bvh, _write_turning_humanoid_full_body_bvh
 
 
 def test_seed_vs_paper_raw_script_help_lists_visualization_options():
@@ -26,6 +26,16 @@ def test_seed_vs_paper_raw_script_help_lists_visualization_options():
   assert "seed G1 CSV against paper_v1 raw upper-body retargeting" in result.stdout
   assert "--paper-raw-offset-to-seed" in result.stdout
   assert "--global-root" in result.stdout
+
+
+def test_seed_vs_paper_raw_arg_parser_defaults_to_full_motion_and_inferred_csv():
+  from scripts.visualize_seed_vs_paper_raw_g1 import build_arg_parser
+
+  args = build_arg_parser().parse_args(["--bvh", "soma_uniform/bvh/231006/full.bvh"])
+
+  assert args.seed_csv is None
+  assert args.start_frame == 0
+  assert args.end_frame is None
 
 
 def test_paper_raw_motion_row_preserves_seed_root_and_lower_body():
@@ -97,6 +107,72 @@ def test_comparison_frames_include_raw_bvh_full_body_skeleton(tmp_path):
 
   assert frame.bvh_full_target.lower.left_leg.hip.shape == (3,)
   assert frame.bvh_full_target.upper.left_arm.shoulder.shape == (3,)
+
+
+def _write_seed_csv(path: Path, frame_count: int) -> None:
+  path.parent.mkdir(parents=True, exist_ok=True)
+  with path.open("w", newline="", encoding="utf-8") as handle:
+    writer = csv.writer(handle)
+    writer.writerow(
+      [
+        "Frame",
+        "root_translateX",
+        "root_translateY",
+        "root_translateZ",
+        "root_rotateX",
+        "root_rotateY",
+        "root_rotateZ",
+        *G1_29DOF_JOINT_COLUMNS,
+      ]
+    )
+    for frame in range(frame_count):
+      writer.writerow([frame, 0, 0, 100, 0, 0, 0, *([0] * len(G1_29DOF_JOINT_COLUMNS))])
+
+
+def test_default_comparison_frame_range_uses_full_available_motion(tmp_path):
+  from scripts.visualize_seed_vs_paper_raw_g1 import VisualizerConfig, build_comparison_frames
+
+  bvh_path = tmp_path / "full.bvh"
+  _write_turning_humanoid_full_body_bvh(bvh_path)
+  csv_path = tmp_path / "seed.csv"
+  _write_seed_csv(csv_path, frame_count=2)
+
+  frames = build_comparison_frames(
+    VisualizerConfig(
+      bvh_path=bvh_path,
+      seed_csv_path=csv_path,
+      apply_orientation_offsets=False,
+      align_upper_arm_axes_to_g1=False,
+      remove_initial_heading=False,
+    )
+  )
+
+  assert [frame.frame_index for frame in frames] == [0, 1]
+
+
+def test_comparison_frames_infer_seed_csv_path_from_bones_seed_bvh_path(tmp_path):
+  from scripts.visualize_seed_vs_paper_raw_g1 import VisualizerConfig, build_comparison_frames
+
+  dataset_root = tmp_path / "bones-seed"
+  bvh_path = dataset_root / "soma_uniform" / "bvh" / "231006" / "full.bvh"
+  bvh_path.parent.mkdir(parents=True)
+  _write_tiny_full_body_bvh(bvh_path)
+  csv_path = dataset_root / "g1" / "csv" / "231006" / "full.csv"
+  _write_seed_csv(csv_path, frame_count=1)
+
+  frames = build_comparison_frames(
+    VisualizerConfig(
+      bvh_path=bvh_path,
+      seed_csv_path=None,
+      start_frame=0,
+      end_frame=0,
+      apply_orientation_offsets=False,
+      align_upper_arm_axes_to_g1=False,
+      remove_initial_heading=False,
+    )
+  )
+
+  assert frames[0].csv_frame == 0
 
 
 def test_next_frame_index_wraps_playback_range():

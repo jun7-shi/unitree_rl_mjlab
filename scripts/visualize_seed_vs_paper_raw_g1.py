@@ -37,9 +37,9 @@ LEFT_SHOULDER_PITCH_UPPER_INDEX = 3
 @dataclass(frozen=True)
 class VisualizerConfig:
   bvh_path: Path
-  seed_csv_path: Path
-  start_frame: int = 250
-  end_frame: int = 320
+  seed_csv_path: Path | None = None
+  start_frame: int = 0
+  end_frame: int | None = None
   port: int = 8090
   fps: float = 10.0
   global_root: bool = False
@@ -106,7 +106,24 @@ def paper_raw_motion_row_from_seed(
   return row
 
 
-def _paper_raw_upper_body_q(config: VisualizerConfig, frame_count: int) -> list[np.ndarray]:
+def infer_seed_csv_path_from_bvh(bvh_path: Path) -> Path:
+  parts = Path(bvh_path).parts
+  for index in range(len(parts) - 1):
+    if parts[index] == "soma_uniform" and parts[index + 1] == "bvh":
+      return Path(*parts[:index], "g1", "csv", *parts[index + 2 :]).with_suffix(".csv")
+  raise ValueError(
+    "Cannot infer seed CSV path from BVH path. Expected a bones-seed path "
+    "containing 'soma_uniform/bvh'; pass --seed-csv explicitly."
+  )
+
+
+def _resolve_seed_csv_path(config: VisualizerConfig) -> Path:
+  if config.seed_csv_path is not None:
+    return config.seed_csv_path
+  return infer_seed_csv_path_from_bvh(config.bvh_path)
+
+
+def _paper_raw_upper_body_q(config: VisualizerConfig, frame_count: int | None = None) -> list[np.ndarray]:
   targets = load_soma_bvh_upper_body_targets(
     config.bvh_path,
     apply_orientation_offsets=config.apply_orientation_offsets,
@@ -116,7 +133,8 @@ def _paper_raw_upper_body_q(config: VisualizerConfig, frame_count: int) -> list[
   retargeter = G1UpperBodySEWRetargeter(algorithm_version=PAPER_V1_ALGORITHM)
   q_previous = np.zeros(UPPER_BODY_DOF, dtype=float)
   rows: list[np.ndarray] = []
-  for target in targets[:frame_count]:
+  selected_targets = targets if frame_count is None else targets[:frame_count]
+  for target in selected_targets:
     result = retargeter.retarget(q_previous, target)
     raw_q = (
       result.solver_joint_angles
@@ -131,18 +149,15 @@ def _paper_raw_upper_body_q(config: VisualizerConfig, frame_count: int) -> list[
 def build_comparison_frames(config: VisualizerConfig) -> list[ComparisonFrame]:
   if config.start_frame < 0:
     raise ValueError(f"start_frame must be non-negative, got {config.start_frame}")
-  if config.end_frame < config.start_frame:
+  if config.end_frame is not None and config.end_frame < config.start_frame:
     raise ValueError(f"end_frame must be >= start_frame, got {config.end_frame}")
 
-  csv_frames, seed_rows = _load_seed_motion_rows(config.seed_csv_path)
-  frame_count = min(len(seed_rows), config.end_frame + 1)
-  if config.end_frame >= len(seed_rows):
-    raise ValueError(f"end_frame {config.end_frame} is out of range for {len(seed_rows)} seed rows")
-  paper_upper_rows = _paper_raw_upper_body_q(config, frame_count)
-  if len(paper_upper_rows) < frame_count:
-    raise ValueError(
-      f"BVH has only {len(paper_upper_rows)} upper-body targets, but seed has {frame_count}"
-    )
+  seed_csv_path = _resolve_seed_csv_path(config)
+  csv_frames, seed_rows = _load_seed_motion_rows(seed_csv_path)
+  if not seed_rows:
+    raise ValueError(f"Seed CSV has no motion rows: {seed_csv_path}")
+  requested_frame_count = None if config.end_frame is None else config.end_frame + 1
+  paper_upper_rows = _paper_raw_upper_body_q(config, requested_frame_count)
   bvh_full_targets = load_soma_bvh_full_body_targets(
     config.bvh_path,
     apply_orientation_offsets=config.apply_orientation_offsets,
@@ -151,13 +166,22 @@ def build_comparison_frames(config: VisualizerConfig) -> list[ComparisonFrame]:
     remove_initial_heading=config.remove_initial_heading,
     localize_to_body_frame=False,
   )
-  if len(bvh_full_targets) < frame_count:
-    raise ValueError(
-      f"BVH has only {len(bvh_full_targets)} display targets, but seed has {frame_count}"
-    )
+  available_frame_count = min(len(seed_rows), len(paper_upper_rows), len(bvh_full_targets))
+  if available_frame_count <= 0:
+    raise ValueError("No overlapping frames are available between seed CSV and BVH")
+
+  end_frame = config.end_frame if config.end_frame is not None else available_frame_count - 1
+  if end_frame >= len(seed_rows):
+    raise ValueError(f"end_frame {end_frame} is out of range for {len(seed_rows)} seed rows")
+  if end_frame >= len(paper_upper_rows):
+    raise ValueError(f"BVH has only {len(paper_upper_rows)} upper-body targets")
+  if end_frame >= len(bvh_full_targets):
+    raise ValueError(f"BVH has only {len(bvh_full_targets)} display targets")
+  if config.start_frame > end_frame:
+    raise ValueError(f"start_frame {config.start_frame} is out of range for end_frame {end_frame}")
 
   frames: list[ComparisonFrame] = []
-  for frame_index in range(config.start_frame, config.end_frame + 1):
+  for frame_index in range(config.start_frame, end_frame + 1):
     seed_row = seed_rows[frame_index]
     paper_upper_q = paper_upper_rows[frame_index]
     seed_pitch_deg = float(np.degrees(seed_row[7 + UPPER_BODY_START + LEFT_SHOULDER_PITCH_UPPER_INDEX]))
@@ -551,9 +575,19 @@ def build_arg_parser() -> argparse.ArgumentParser:
     )
   )
   parser.add_argument("--bvh", required=True, type=Path, help="Input SOMA/bones-seed BVH file.")
-  parser.add_argument("--seed-csv", required=True, type=Path, help="Input bones-seed G1 CSV file.")
-  parser.add_argument("--start-frame", type=int, default=250, help="First frame to show.")
-  parser.add_argument("--end-frame", type=int, default=320, help="Last frame to show, inclusive.")
+  parser.add_argument(
+    "--seed-csv",
+    type=Path,
+    default=None,
+    help="Input bones-seed G1 CSV file. Defaults to the matching g1/csv path inferred from --bvh.",
+  )
+  parser.add_argument("--start-frame", type=int, default=0, help="First frame to show.")
+  parser.add_argument(
+    "--end-frame",
+    type=int,
+    default=None,
+    help="Last frame to show, inclusive. Defaults to the full available motion.",
+  )
   parser.add_argument("--port", type=int, default=8090, help="Viser web server port.")
   parser.add_argument("--fps", type=float, default=10.0, help="Autoplay FPS.")
   parser.add_argument(
