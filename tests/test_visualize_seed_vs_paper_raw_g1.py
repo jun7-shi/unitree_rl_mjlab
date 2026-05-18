@@ -365,7 +365,7 @@ def test_bvh_world_display_uses_fixed_initial_alignment(tmp_path):
   )
   np.testing.assert_allclose(
     shifted.skeleton_segments - snapshot.skeleton_segments,
-    np.full_like(snapshot.skeleton_segments, alignment.rotation @ bvh_delta),
+    np.full_like(snapshot.skeleton_segments, bvh_delta),
     atol=1e-8,
   )
 
@@ -377,9 +377,7 @@ def test_bvh_world_display_uses_fixed_initial_alignment(tmp_path):
     display_mode=WORLD_DISPLAY_MODE,
     world_alignment=yaw_90_alignment,
   )
-  rotated_left_axis = rotated.keypoints[7] - rotated.keypoints[10]
-  rotated_left_axis = rotated_left_axis / np.linalg.norm(rotated_left_axis)
-  np.testing.assert_allclose(rotated_left_axis, [-1.0, 0.0, 0.0], atol=1e-8)
+  np.testing.assert_allclose(rotated.skeleton_segments, snapshot.skeleton_segments, atol=1e-8)
 
 
 def _translate_full_body_target(target, delta: np.ndarray):

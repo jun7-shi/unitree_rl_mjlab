@@ -175,7 +175,7 @@ def build_comparison_frames(config: VisualizerConfig) -> list[ComparisonFrame]:
     apply_orientation_offsets=config.apply_orientation_offsets,
     align_upper_arm_axes_to_g1=False,
     apply_lower_body_offsets=False,
-    remove_initial_heading=config.remove_initial_heading,
+    remove_initial_heading=config.remove_initial_heading and config.display_mode == BODY_CENTRIC_DISPLAY_MODE,
     localize_to_body_frame=False,
   )
   available_frame_count = min(len(seed_rows), len(paper_upper_rows), len(bvh_full_targets))
@@ -231,14 +231,6 @@ def _wxyz_from_xmat(xmat: Sequence[float]) -> np.ndarray:
   quat = np.empty(4, dtype=float)
   mujoco.mju_mat2Quat(quat, np.asarray(xmat, dtype=float).reshape(9))
   return quat
-
-
-def _rotation_matrix_from_seed_motion_row(row: Sequence[float]) -> np.ndarray:
-  values = list(row)
-  quat_wxyz = np.asarray([values[6], values[3], values[4], values[5]], dtype=float)
-  matrix = np.empty(9, dtype=float)
-  mujoco.mju_quat2Mat(matrix, quat_wxyz)
-  return matrix.reshape(3, 3)
 
 
 def _articulated_geom_pose_snapshot(
@@ -353,44 +345,18 @@ def _bvh_full_origin(target: FullBodyTarget) -> np.ndarray:
   return 0.5 * (target.upper.left_arm.shoulder + target.upper.right_arm.shoulder)
 
 
-def _bvh_display_origin(target: FullBodyTarget, display_mode: str) -> np.ndarray:
-  if display_mode == BODY_CENTRIC_DISPLAY_MODE:
-    return _bvh_full_origin(target)
-  if display_mode == WORLD_DISPLAY_MODE:
-    return _bvh_hip_center(target)
-  raise ValueError(f"display_mode must be one of {DISPLAY_MODES}, got {display_mode!r}")
-
-
 def _bvh_hip_center(target: FullBodyTarget) -> np.ndarray:
   return 0.5 * (target.lower.left_leg.hip + target.lower.right_leg.hip)
-
-
-def _project_bvh_up_axis(candidate: np.ndarray, left_axis: np.ndarray) -> np.ndarray:
-  for axis in (candidate, np.array([0.0, 0.0, 1.0]), np.array([1.0, 0.0, 0.0])):
-    projected = axis - left_axis * float(np.dot(axis, left_axis))
-    norm = float(np.linalg.norm(projected))
-    if norm > 1e-12:
-      return projected / norm
-  raise ValueError("Cannot construct a BVH body frame from collinear hip and chest keypoints")
-
-
-def _bvh_body_frame(target: FullBodyTarget) -> np.ndarray:
-  left_hip = target.lower.left_leg.hip
-  right_hip = target.lower.right_leg.hip
-  left_axis = normalize(left_hip - right_hip)
-  up_axis = _project_bvh_up_axis(target.upper.chest_position - _bvh_hip_center(target), left_axis)
-  forward_axis = normalize(np.cross(left_axis, up_axis))
-  up_axis = normalize(np.cross(forward_axis, left_axis))
-  return np.column_stack([forward_axis, left_axis, up_axis])
 
 
 def bvh_world_alignment_from_frame(
   target: FullBodyTarget,
   seed_motion_row: Sequence[float],
 ) -> BvhWorldAlignment:
-  bvh_body_frame = _bvh_body_frame(target)
-  seed_root_orientation = _rotation_matrix_from_seed_motion_row(seed_motion_row)
-  rotation = seed_root_orientation @ bvh_body_frame.T
+  # The loader has already applied the fixed SOMA/BVH -> mjlab/G1 coordinate
+  # rotation. Seed root orientation is an optimized G1 result, so it must not
+  # rotate BVH display geometry.
+  rotation = np.eye(3)
   seed_root_position = np.asarray(seed_motion_row[:3], dtype=float)
   translation = seed_root_position - rotation @ _bvh_hip_center(target)
   return BvhWorldAlignment(rotation=rotation, translation=translation)
