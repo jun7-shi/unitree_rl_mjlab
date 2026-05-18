@@ -90,6 +90,12 @@ class BvhDisplaySnapshot:
 
 
 @dataclass(frozen=True)
+class BvhWorldAlignment:
+  rotation: np.ndarray
+  translation: np.ndarray
+
+
+@dataclass(frozen=True)
 class BvhDisplayHandles:
   skeleton_handle: object
   axes_handle: object
@@ -378,12 +384,24 @@ def _bvh_body_frame(target: FullBodyTarget) -> np.ndarray:
   return np.column_stack([forward_axis, left_axis, up_axis])
 
 
+def bvh_world_alignment_from_frame(
+  target: FullBodyTarget,
+  seed_motion_row: Sequence[float],
+) -> BvhWorldAlignment:
+  bvh_body_frame = _bvh_body_frame(target)
+  seed_root_orientation = _rotation_matrix_from_seed_motion_row(seed_motion_row)
+  rotation = seed_root_orientation @ bvh_body_frame.T
+  seed_root_position = np.asarray(seed_motion_row[:3], dtype=float)
+  translation = seed_root_position - rotation @ _bvh_hip_center(target)
+  return BvhWorldAlignment(rotation=rotation, translation=translation)
+
+
 def _bvh_display_point_transform(
   target: FullBodyTarget,
   offset: np.ndarray,
   *,
   display_mode: str,
-  seed_motion_row: Sequence[float] | None,
+  world_alignment: BvhWorldAlignment | None,
 ):
   if display_mode == BODY_CENTRIC_DISPLAY_MODE:
     origin = _bvh_full_origin(target)
@@ -393,16 +411,11 @@ def _bvh_display_point_transform(
 
     return transform
   if display_mode == WORLD_DISPLAY_MODE:
-    if seed_motion_row is None:
-      raise ValueError("seed_motion_row is required for BVH world display mode")
-    origin = _bvh_hip_center(target)
-    body_frame = _bvh_body_frame(target)
-    root_position = np.asarray(seed_motion_row[:3], dtype=float)
-    root_orientation = _rotation_matrix_from_seed_motion_row(seed_motion_row)
+    if world_alignment is None:
+      raise ValueError("world_alignment is required for BVH world display mode")
 
     def transform(point: np.ndarray) -> np.ndarray:
-      local = body_frame.T @ (np.asarray(point, dtype=float) - origin)
-      return root_position + root_orientation @ local + offset
+      return world_alignment.rotation @ np.asarray(point, dtype=float) + world_alignment.translation + offset
 
     return transform
   raise ValueError(f"display_mode must be one of {DISPLAY_MODES}, got {display_mode!r}")
@@ -413,13 +426,13 @@ def _full_bvh_segments(
   offset: np.ndarray,
   *,
   display_mode: str,
-  seed_motion_row: Sequence[float] | None,
+  world_alignment: BvhWorldAlignment | None,
 ) -> np.ndarray:
   p = _bvh_display_point_transform(
     target,
     offset,
     display_mode=display_mode,
-    seed_motion_row=seed_motion_row,
+    world_alignment=world_alignment,
   )
 
   upper = target.upper
@@ -448,13 +461,13 @@ def _full_bvh_points(
   offset: np.ndarray,
   *,
   display_mode: str,
-  seed_motion_row: Sequence[float] | None,
+  world_alignment: BvhWorldAlignment | None,
 ) -> np.ndarray:
   transform = _bvh_display_point_transform(
     target,
     offset,
     display_mode=display_mode,
-    seed_motion_row=seed_motion_row,
+    world_alignment=world_alignment,
   )
   upper = target.upper
   lower = target.lower
@@ -482,13 +495,13 @@ def _full_bvh_axis_segments(
   *,
   display_mode: str,
   axis_length: float,
-  seed_motion_row: Sequence[float] | None,
+  world_alignment: BvhWorldAlignment | None,
 ) -> np.ndarray:
   p = _bvh_display_point_transform(
     target,
     offset,
     display_mode=display_mode,
-    seed_motion_row=seed_motion_row,
+    world_alignment=world_alignment,
   )
 
   upper = target.upper
@@ -513,27 +526,27 @@ def _bvh_display_snapshot(
   offset: np.ndarray,
   *,
   display_mode: str,
-  seed_motion_row: Sequence[float] | None = None,
+  world_alignment: BvhWorldAlignment | None = None,
 ) -> BvhDisplaySnapshot:
   return BvhDisplaySnapshot(
     skeleton_segments=_full_bvh_segments(
       target,
       offset,
       display_mode=display_mode,
-      seed_motion_row=seed_motion_row,
+      world_alignment=world_alignment,
     ),
     axis_segments=_full_bvh_axis_segments(
       target,
       offset,
       display_mode=display_mode,
       axis_length=0.18,
-      seed_motion_row=seed_motion_row,
+      world_alignment=world_alignment,
     ),
     keypoints=_full_bvh_points(
       target,
       offset,
       display_mode=display_mode,
-      seed_motion_row=seed_motion_row,
+      world_alignment=world_alignment,
     ),
   )
 
@@ -629,14 +642,14 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
   def add_bvh_target(
     name: str,
     target: FullBodyTarget,
-    row: Sequence[float],
+    world_alignment: BvhWorldAlignment | None,
     offset: np.ndarray,
   ) -> BvhDisplayHandles:
     snapshot = _bvh_display_snapshot(
       target,
       offset,
       display_mode=config.display_mode,
-      seed_motion_row=row,
+      world_alignment=world_alignment,
     )
     skeleton_handle = server.scene.add_line_segments(
         f"/{name}/skeleton",
@@ -674,24 +687,29 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
   def update_bvh_target(
     handles: BvhDisplayHandles,
     target: FullBodyTarget,
-    row: Sequence[float],
+    world_alignment: BvhWorldAlignment | None,
     offset: np.ndarray,
   ) -> None:
     snapshot = _bvh_display_snapshot(
       target,
       offset,
       display_mode=config.display_mode,
-      seed_motion_row=row,
+      world_alignment=world_alignment,
     )
     handles.skeleton_handle.points = snapshot.skeleton_segments
     handles.axes_handle.points = snapshot.axis_segments
     handles.keypoints_handle.points = snapshot.keypoints
 
   initial_frame = frame_by_index[min(frame_indices)]
+  bvh_world_alignment = (
+    bvh_world_alignment_from_frame(initial_frame.bvh_full_target, initial_frame.seed_motion_row)
+    if config.display_mode == WORLD_DISPLAY_MODE
+    else None
+  )
   bvh_display = add_bvh_target(
     "BVH full skeleton",
     initial_frame.bvh_full_target,
-    initial_frame.seed_motion_row,
+    bvh_world_alignment,
     offsets["bvh"],
   )
   seed_robot = add_articulated_robot(
@@ -715,7 +733,7 @@ def _run_viser(frames: Sequence[ComparisonFrame], config: VisualizerConfig) -> N
     if last_rendered_frame == frame_index:
       return
     frame = frame_by_index[int(frame_index)]
-    update_bvh_target(bvh_display, frame.bvh_full_target, frame.seed_motion_row, offsets["bvh"])
+    update_bvh_target(bvh_display, frame.bvh_full_target, bvh_world_alignment, offsets["bvh"])
     update_articulated_robot(seed_robot, seed_context, frame.seed_motion_row, offsets["seed"])
     update_articulated_robot(
       paper_robot,

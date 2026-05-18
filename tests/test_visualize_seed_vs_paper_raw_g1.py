@@ -1,6 +1,7 @@
 import csv
 import subprocess
 import sys
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -324,9 +325,10 @@ def test_bvh_display_snapshot_updates_points_with_stable_shapes(tmp_path):
   assert not np.allclose(first.skeleton_segments, second.skeleton_segments)
 
 
-def test_bvh_world_display_aligns_skeleton_to_seed_root_pose(tmp_path):
+def test_bvh_world_display_uses_fixed_initial_alignment(tmp_path):
   from scripts.visualize_seed_vs_paper_raw_g1 import (
     WORLD_DISPLAY_MODE,
+    bvh_world_alignment_from_frame,
     _bvh_display_snapshot,
   )
   from src.motion.bvh_full_body import load_soma_bvh_full_body_targets
@@ -340,39 +342,74 @@ def test_bvh_world_display_aligns_skeleton_to_seed_root_pose(tmp_path):
     remove_initial_heading=False,
   )[0]
   seed_row = [1.25, -0.5, 0.8, 0.0, 0.0, 0.0, 1.0, *([0.0] * len(G1_29DOF_JOINT_COLUMNS))]
+  alignment = bvh_world_alignment_from_frame(target, seed_row)
 
   snapshot = _bvh_display_snapshot(
     target,
     np.zeros(3),
     display_mode=WORLD_DISPLAY_MODE,
-    seed_motion_row=seed_row,
+    world_alignment=alignment,
   )
 
   left_hip = snapshot.keypoints[7]
   right_hip = snapshot.keypoints[10]
   np.testing.assert_allclose(0.5 * (left_hip + right_hip), seed_row[:3], atol=1e-8)
 
-  shifted_row = list(seed_row)
-  shifted_row[0] += 0.4
+  bvh_delta = np.array([0.4, 0.0, 0.0])
+  shifted_target = _translate_full_body_target(target, bvh_delta)
   shifted = _bvh_display_snapshot(
-    target,
+    shifted_target,
     np.zeros(3),
     display_mode=WORLD_DISPLAY_MODE,
-    seed_motion_row=shifted_row,
+    world_alignment=alignment,
   )
   np.testing.assert_allclose(
     shifted.skeleton_segments - snapshot.skeleton_segments,
-    np.full_like(snapshot.skeleton_segments, [0.4, 0.0, 0.0]),
+    np.full_like(snapshot.skeleton_segments, alignment.rotation @ bvh_delta),
     atol=1e-8,
   )
 
   yaw_90_row = [1.25, -0.5, 0.8, 0.0, 0.0, np.sqrt(0.5), np.sqrt(0.5), *([0.0] * len(G1_29DOF_JOINT_COLUMNS))]
+  yaw_90_alignment = bvh_world_alignment_from_frame(target, yaw_90_row)
   rotated = _bvh_display_snapshot(
     target,
     np.zeros(3),
     display_mode=WORLD_DISPLAY_MODE,
-    seed_motion_row=yaw_90_row,
+    world_alignment=yaw_90_alignment,
   )
   rotated_left_axis = rotated.keypoints[7] - rotated.keypoints[10]
   rotated_left_axis = rotated_left_axis / np.linalg.norm(rotated_left_axis)
   np.testing.assert_allclose(rotated_left_axis, [-1.0, 0.0, 0.0], atol=1e-8)
+
+
+def _translate_full_body_target(target, delta: np.ndarray):
+  def arm(value):
+    return replace(
+      value,
+      shoulder=value.shoulder + delta,
+      elbow=value.elbow + delta,
+      wrist=value.wrist + delta,
+    )
+
+  def leg(value):
+    return replace(
+      value,
+      hip=value.hip + delta,
+      knee=value.knee + delta,
+      ankle=value.ankle + delta,
+    )
+
+  return replace(
+    target,
+    lower=replace(
+      target.lower,
+      left_leg=leg(target.lower.left_leg),
+      right_leg=leg(target.lower.right_leg),
+    ),
+    upper=replace(
+      target.upper,
+      chest_position=target.upper.chest_position + delta,
+      left_arm=arm(target.upper.left_arm),
+      right_arm=arm(target.upper.right_arm),
+    ),
+  )
